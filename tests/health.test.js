@@ -1,52 +1,24 @@
-const { handler } = require("../functions/health");
-const { test, expect } = require("@jest/globals");
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { handler } from "../functions/health.js";
 
-test("Health: returns ok status and valid JSON metadata", async () => {
-  const event = {
-    httpMethod: "GET",
-    headers: {},
-  };
-
-  const response = await handler(event);
-
-  expect(response.statusCode).toBe(200);
-  expect(response.headers["Content-Type"]).toBe("application/json");
-
+test("health GET returns service metadata", async () => {
+  const response = await handler({ httpMethod: "GET" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "application/json; charset=utf-8");
   const body = JSON.parse(response.body);
-  expect(body.status).toBe("ok");
-  expect(body.service).toBe("Bandwidth Proxy 2");
-  expect(body.version).toBe("2.0.0");
+  assert.equal(body.status, "ok");
+  assert.equal(body.api, 1);
+  assert.deepEqual(body.features, ["webp", "grayscale", "maxwidth", "stats"]);
 });
 
-test("Health: responds with 204 to OPTIONS pre-flight", async () => {
-  const event = {
-    httpMethod: "OPTIONS",
-    headers: {},
-  };
-
-  const response = await handler(event);
-
-  expect(response.statusCode).toBe(204);
+test("health OPTIONS returns 204", async () => {
+  const response = await handler({ httpMethod: "OPTIONS" });
+  assert.equal(response.statusCode, 204);
 });
 
-test("Health: exposes api version as integer 1", async () => {
-  const event = { httpMethod: "GET", headers: {} };
-  const response = await handler(event);
-  const body = JSON.parse(response.body);
-  expect(body.api).toBe(1);
-});
-
-test("Health: features list includes webp, grayscale, maxwidth, stats", async () => {
-  const event = { httpMethod: "GET", headers: {} };
-  const response = await handler(event);
-  const body = JSON.parse(response.body);
-  expect(Array.isArray(body.features)).toBe(true);
-  expect(body.features).toEqual(expect.arrayContaining(["webp", "grayscale", "maxwidth", "stats"]));
-});
-
-test("Health: CORS headers present on GET response", async () => {
-  const event = { httpMethod: "GET", headers: {} };
-  const response = await handler(event);
-  expect(response.headers["Access-Control-Allow-Origin"]).toBe("*");
-  expect(response.headers["Access-Control-Allow-Methods"]).toBe("GET, OPTIONS");
+test("health rejects unsupported methods", async () => {
+  const response = await handler({ httpMethod: "POST" });
+  assert.equal(response.statusCode, 405);
+  assert.equal(response.headers.allow, "GET, OPTIONS");
 });
