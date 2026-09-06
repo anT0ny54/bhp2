@@ -1,12 +1,5 @@
-// Since only single function required from lodash or underscore, writing it self
-
-// Picks specific properties from an object
-module.exports = (object, properties) => {
-  let picked = {};
-  for (let key in object || (object = {})) {
-    if (Object.hasOwnProperty.call(object, key) && properties.includes(key)) {
-      picked[key] = object[key];
-    }
-  }
-  return picked;
-};
+export default function pick(object, properties) {
+  const source = object && typeof object === "object" ? object : {};
+  const allowed = new Set(properties || []);
+  return Object.fromEntries(Object.entries(source).filter(([key]) => allowed.has(key)));
+}
