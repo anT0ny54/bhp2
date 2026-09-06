@@ -1,30 +1,27 @@
+const VERSION = "2.0.1";
+const HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store",
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+  "access-control-allow-headers": "*",
+  "x-content-type-options": "nosniff",
+};
+
 export async function handler(event = {}) {
-  if (event.httpMethod && event.httpMethod !== "GET") {
-    return {
-      statusCode: 405,
-      headers: {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-        allow: "GET",
-      },
-      body: JSON.stringify({
-        error: "Method Not Allowed",
-      }),
-    };
-  }
+  const method = event.httpMethod || "GET";
+  if (method === "OPTIONS") return { statusCode: 204, headers: HEADERS, body: "" };
+  if (method !== "GET") return { statusCode: 405, headers: { ...HEADERS, allow: "GET, OPTIONS" }, body: JSON.stringify({ error: "Method Not Allowed" }) };
 
   return {
     statusCode: 200,
-    headers: {
-      "content-type": "application/json",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "x-content-type-options": "nosniff",
-    },
+    headers: HEADERS,
     body: JSON.stringify({
       status: "ok",
       service: "bandwidth-hero-proxy",
-      version: "2.0.1",
+      version: VERSION,
+      api: 1,
+      features: ["webp", "grayscale", "maxwidth", "stats"],
     }),
   };
 }
