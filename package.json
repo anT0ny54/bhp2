@@ -1,6 +1,6 @@
 {
   "name": "bandwidth-hero-proxy2",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Serverless image compression proxy for Bandwidth Hero-compatible extensions",
   "type": "module",
   "main": "functions/index.js",
@@ -8,8 +8,8 @@
     "start": "netlify dev",
     "dev": "netlify dev --offline",
     "build": "npm run validate",
-    "validate": "node --check functions/index.js && node --check functions/health.js && node --check util/validate.js",
-    "test": "node --test tests/index.test.js"
+    "validate": "node --check functions/index.js && node --check functions/health.js && node --check util/validate.js && node --check util/fetch.js && node --check util/compress.js && node --check util/pick.js && node --check util/shouldCompress.js",
+    "test": "node --test tests/index.test.js tests/health.test.js"
   },
   "dependencies": {
     "sharp": "^0.33.5"
