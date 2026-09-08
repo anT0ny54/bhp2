@@ -4,12 +4,15 @@
 
 [build.environment]
   NODE_VERSION = "22"
-  NPM_FLAGS = "--omit=optional"
 
 [functions]
   node_bundler = "esbuild"
-  # Critical: ensure sharp's native binaries are included in the lambda package
-  included_files = ["node_modules/sharp/**/*"]
+  # Keep Sharp and its platform-specific native packages available at runtime.
+  external_node_modules = ["sharp"]
+  included_files = [
+    "node_modules/sharp/**/*",
+    "node_modules/@img/**/*"
+  ]
 
 [[redirects]]
   from = "/api/*"
