@@ -1,4 +1,4 @@
-const VERSION = "2.0.1";
+const VERSION = "2.1.0";
 const HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
@@ -11,7 +11,13 @@ const HEADERS = {
 export async function handler(event = {}) {
   const method = event.httpMethod || "GET";
   if (method === "OPTIONS") return { statusCode: 204, headers: HEADERS, body: "" };
-  if (method !== "GET") return { statusCode: 405, headers: { ...HEADERS, allow: "GET, OPTIONS" }, body: JSON.stringify({ error: "Method Not Allowed" }) };
+  if (method !== "GET") {
+    return {
+      statusCode: 405,
+      headers: { ...HEADERS, allow: "GET, OPTIONS" },
+      body: JSON.stringify({ error: "Method Not Allowed" }),
+    };
+  }
 
   return {
     statusCode: 200,
