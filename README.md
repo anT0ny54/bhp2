@@ -41,6 +41,7 @@ For optimal security and ad-blocking, configure your DNS with **My Free DNS**:
 
 | Blocklist | DNS-over-HTTPS Endpoint |
 |-----------|------------------------|
+| **HaGeZi Multi Pro + TIF** | `https://freedns.koyeb.app/dns-query` ✅ |
 | **HaGeZi Multi Pro + TIF** | `https://freedns-six.vercel.app/api/doh/dns-query` ✅ |
 | **HaGeZi Multi Pro + TIF** | `https://dnssix.netlify.app/api/doh/dns-query` |
 
