@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.1.0  
+**Version:** 2.2.0  
 **API:** 1  
 **Status:** Stable
 
