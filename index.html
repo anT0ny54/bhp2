@@ -1,318 +1,85 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#071019">
+  <meta name="description" content="Bandwidth Hero-compatible image compression proxy diagnostics and setup page.">
   <title>Bandwidth Hero Proxy</title>
-
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0d1117;
-      color: #c9d1d9;
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-    }
-
-    main {
-      width: min(640px, 100%);
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 12px;
-      padding: 32px;
-      box-sizing: border-box;
-    }
-
-    h1 {
-      margin-top: 0;
-      color: #f0f6fc;
-    }
-
-    code {
-      display: block;
-      margin: 8px 0;
-      padding: 10px;
-      overflow-wrap: anywhere;
-      background: #0d1117;
-      border-radius: 6px;
-      color: #ff7b72;
-    }
-
-    button {
-      width: 100%;
-      border: 0;
-      border-radius: 6px;
-      padding: 12px 16px;
-      background: #1f6feb;
-      color: white;
-      font-size: 15px;
-      cursor: pointer;
-    }
-
-    button:disabled {
-      opacity: 0.6;
-      cursor: wait;
-    }
-
-    ul {
-      padding: 0;
-      list-style: none;
-    }
-
-    li {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 12px 0;
-      border-bottom: 1px solid #30363d;
-    }
-
-    .ok {
-      color: #56d364;
-    }
-
-    .fail {
-      color: #f85149;
-    }
-
-    .pending {
-      color: #8b949e;
-    }
-
-    .metric {
-      color: #8b949e;
-      font-size: 13px;
-      margin-top: 4px;
-    }
-  </style>
+  <link rel="stylesheet" href="/site.css">
 </head>
-
 <body>
-  <main>
-    <h1>⚡ Bandwidth Hero Proxy</h1>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">⚡</div>
+        <div>
+          <div class="eyebrow">Bandwidth Hero Server</div>
+          <h1>Save data. Keep images fast.</h1>
+          <p class="lead">A lightweight image-compression proxy for Bandwidth Guardian and other Bandwidth Hero-compatible Chromium extensions.</p>
+        </div>
+      </div>
+      <div class="badge"><span class="dot"></span> Netlify proxy online</div>
+    </header>
 
-    <p>
-      Configure your extension with this proxy URL:
-    </p>
+    <section class="grid">
+      <article class="card">
+        <div class="card-inner">
+          <h2>Proxy endpoint</h2>
+          <p>Paste this URL into Bandwidth Guardian's proxy setting.</p>
+          <div class="proxy">
+            <code id="proxy-url" aria-label="Proxy URL"></code>
+            <button class="copy" id="copy-button" type="button">Copy URL</button>
+          </div>
+          <div class="actions">
+            <button class="primary" id="diagnostics-button" type="button">Run diagnostics</button>
+          </div>
+          <p class="note">The API remains compatible with <code>url</code>, <code>quality</code>, <code>bw</code>, <code>jpeg</code>, and <code>max_width</code>.</p>
 
-    <code id="proxy-url"></code>
+          <div class="status-list" aria-live="polite">
+            <div class="status">
+              <div class="status-icon" id="reachable-icon">•</div>
+              <div><div class="status-title">Proxy reachable</div><div class="status-detail" id="reachable-metric"></div></div>
+              <strong class="state pending" id="reachable-status">Pending</strong>
+            </div>
+            <div class="status">
+              <div class="status-icon" id="cors-icon">•</div>
+              <div><div class="status-title">CORS + handshake</div><div class="status-detail" id="cors-metric"></div></div>
+              <strong class="state pending" id="cors-status">Pending</strong>
+            </div>
+            <div class="status">
+              <div class="status-icon" id="compression-icon">•</div>
+              <div><div class="status-title">Image compression</div><div class="status-detail" id="compression-metric"></div></div>
+              <strong class="state pending" id="compression-status">Pending</strong>
+            </div>
+            <div class="status">
+              <div class="status-icon" id="cache-icon">•</div>
+              <div><div class="status-title">Caching headers</div><div class="status-detail" id="cache-metric"></div></div>
+              <strong class="state pending" id="cache-status">Pending</strong>
+            </div>
+          </div>
+        </div>
+      </article>
 
-    <button id="diagnostics-button">
-      Run diagnostics
-    </button>
+      <aside class="card">
+        <div class="card-inner">
+          <h2>Designed for your extension</h2>
+          <div class="quick">
+            <div class="quick-item"><strong>WebP / JPEG</strong><span>WebP by default, with JPEG fallback support.</span></div>
+            <div class="quick-item"><strong>Bandwidth savings</strong><span>Quality and maximum-width controls are preserved.</span></div>
+            <div class="quick-item"><strong>Safe fetching</strong><span>HTTP(S)-only URLs, private-IP blocking, redirect validation and input limits.</span></div>
+            <div class="quick-item"><strong>CDN friendly</strong><span>Public results are cacheable; cookie-bearing requests stay private.</span></div>
+          </div>
+        </div>
+      </aside>
+    </section>
 
-    <ul>
-      <li>
-        <span>
-          Proxy reachable
-          <div class="metric" id="reachable-metric"></div>
-        </span>
-        <strong class="pending" id="reachable-status">Pending</strong>
-      </li>
-
-      <li>
-        <span>
-          CORS enabled
-          <div class="metric" id="cors-metric"></div>
-        </span>
-        <strong class="pending" id="cors-status">Pending</strong>
-      </li>
-
-      <li>
-        <span>
-          Image compression
-          <div class="metric" id="compression-metric"></div>
-        </span>
-        <strong class="pending" id="compression-status">Pending</strong>
-      </li>
-
-      <li>
-        <span>
-          Caching headers
-          <div class="metric" id="cache-metric"></div>
-        </span>
-        <strong class="pending" id="cache-status">Pending</strong>
-      </li>
-    </ul>
+    <footer>
+      <a href="https://github.com/anT0ny54/bhp2" target="_blank" rel="noopener noreferrer">BHP2 source</a>
+      · <a href="https://github.com/anT0ny54/bandwidth-guardian" target="_blank" rel="noopener noreferrer">Bandwidth Guardian</a>
+      · <a href="/api/health">API health</a>
+    </footer>
   </main>
-
-  <script>
-    const proxyPath = "/api/index";
-    const proxyUrl = `${window.location.origin}${proxyPath}`;
-
-    document.getElementById("proxy-url").textContent = proxyUrl;
-
-    const button = document.getElementById("diagnostics-button");
-
-    function setStatus(id, passed, text) {
-      const element = document.getElementById(id);
-
-      element.textContent = passed ? "Passed" : "Failed";
-      element.className = passed ? "ok" : "fail";
-
-      if (text) {
-        document.getElementById(
-          id.replace("-status", "-metric")
-        ).textContent = text;
-      }
-    }
-
-    function resetStatuses() {
-      for (const id of [
-        "reachable-status",
-        "cors-status",
-        "compression-status",
-        "cache-status"
-      ]) {
-        const element = document.getElementById(id);
-        element.textContent = "Pending";
-        element.className = "pending";
-      }
-
-      document.getElementById("reachable-metric").textContent = "";
-      document.getElementById("cors-metric").textContent = "";
-      document.getElementById("compression-metric").textContent = "";
-      document.getElementById("cache-metric").textContent = "";
-    }
-
-    async function runDiagnostics() {
-      resetStatuses();
-      button.disabled = true;
-      button.textContent = "Running...";
-
-      try {
-        const healthResponse = await fetch("/api/health");
-        const healthData = await healthResponse.json();
-
-        const healthPassed =
-          healthResponse.status === 200 &&
-          healthData.status === "ok";
-
-        setStatus(
-          "reachable-status",
-          healthPassed,
-          healthPassed
-            ? "Health endpoint returned status: ok"
-            : "Health endpoint returned an invalid response"
-        );
-
-        if (!healthPassed) {
-          setStatus(
-            "cors-status",
-            false,
-            "The health endpoint did not pass"
-          );
-          return;
-        }
-
-        const handshakeResponse = await fetch(proxyPath);
-        const handshake = await handshakeResponse.text();
-
-        const corsPassed =
-          handshakeResponse.status === 200 &&
-          handshake === "bandwidth-hero-proxy" &&
-          handshakeResponse.headers.get(
-            "access-control-allow-origin"
-          ) === "*";
-
-        setStatus(
-          "cors-status",
-          corsPassed,
-          corsPassed
-            ? "CORS and handshake verified"
-            : "CORS or handshake verification failed"
-        );
-
-        const testImage =
-          "https://avatars.githubusercontent.com/u/9919";
-
-        const start = Date.now();
-
-        const imageResponse = await fetch(
-          `${proxyPath}?url=${encodeURIComponent(testImage)}`
-        );
-
-        const elapsed = Date.now() - start;
-        const contentType =
-          imageResponse.headers.get("content-type") || "";
-
-        const originalSize = Number(
-          imageResponse.headers.get("x-bh-original-size") || 0
-        );
-
-        const bytesSaved = Number(
-          imageResponse.headers.get("x-bh-bytes-saved") || 0
-        );
-
-        const compressionPassed =
-          imageResponse.status === 200 &&
-          contentType.startsWith("image/") &&
-          originalSize > 0;
-
-        const percentage = originalSize
-          ? ((bytesSaved / originalSize) * 100).toFixed(1)
-          : "0.0";
-
-        setStatus(
-          "compression-status",
-          compressionPassed,
-          compressionPassed
-            ? `${contentType}, ${elapsed} ms, saved ${percentage}%`
-            : "Compression request failed"
-        );
-
-        const cacheControl =
-          imageResponse.headers.get("cache-control") || "";
-
-        const cachePassed =
-          cacheControl.length > 0 &&
-          cacheControl.startsWith("public,");
-
-        setStatus(
-          "cache-status",
-          cachePassed,
-          cachePassed
-            ? `Cache-Control: ${cacheControl}`
-            : "Cache-Control header missing or invalid"
-        );
-      } catch (error) {
-        setStatus(
-          "reachable-status",
-          false,
-          "Could not connect to the health endpoint"
-        );
-
-        setStatus(
-          "cors-status",
-          false,
-          "Diagnostics stopped"
-        );
-
-        setStatus(
-          "compression-status",
-          false,
-          "Diagnostics stopped"
-        );
-
-        setStatus(
-          "cache-status",
-          false,
-          "Diagnostics stopped"
-        );
-      } finally {
-        button.disabled = false;
-        button.textContent = "Run diagnostics again";
-      }
-    }
-
-    button.addEventListener("click", runDiagnostics);
-  </script>
+  <script src="/site.js" defer></script>
 </body>
 </html>

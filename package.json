@@ -1,7 +1,7 @@
 {
   "name": "bandwidth-hero-proxy2",
-  "version": "2.1.0",
-  "description": "Bandwidth Hero-compatible image compression proxy optimized for Netlify Functions",
+  "version": "2.2.0",
+  "description": "Bandwidth Hero-compatible image compression proxy optimized for Netlify Functions and mobile-friendly diagnostics",
   "type": "module",
   "main": "functions/index.js",
   "scripts": {
