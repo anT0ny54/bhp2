@@ -17,7 +17,7 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.1.0";
+const PROXY_VERSION = "2.2.0";
 const API_VERSION = "1";
 
 const CORS_HEADERS = {
