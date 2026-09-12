@@ -4,6 +4,7 @@ import net from "node:net";
 export const INVALID_URL_ERROR = "Invalid URL. Only HTTP and HTTPS URLs are supported.";
 export const PRIVATE_HOST_ERROR = "Requests to private or local addresses are not allowed.";
 export const DNS_RESOLUTION_ERROR = "Unable to resolve the remote host.";
+const DNS_LOOKUP_TIMEOUT_MS = 2_000;
 
 let dnsLookup = defaultDnsLookup;
 async function defaultDnsLookup(hostname) {
@@ -101,13 +102,26 @@ export function validateRemoteUrl(value) {
 export async function resolveAndValidateRemoteUrl(value) {
   const validation = validateRemoteUrl(value);
   if (!validation.valid) return validation;
+
+  const hostname = new URL(validation.url).hostname;
   try {
-    const records = await dnsLookup(new URL(validation.url).hostname);
-    if (!Array.isArray(records) || records.length === 0 || records.some((record) => isPrivateIp(record.address))) {
+    const records = await Promise.race([
+      dnsLookup(hostname),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("DNS_TIMEOUT")), DNS_LOOKUP_TIMEOUT_MS)
+      ),
+    ]);
+
+    if (
+      !Array.isArray(records) ||
+      records.length === 0 ||
+      records.some((record) => isPrivateIp(record.address))
+    ) {
       return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
     }
   } catch {
     return { valid: false, error: DNS_RESOLUTION_ERROR, statusCode: 502 };
   }
+
   return validation;
 }

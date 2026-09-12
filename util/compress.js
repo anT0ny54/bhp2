@@ -2,7 +2,7 @@ import sharp from "sharp";
 
 export async function compress(input, useWebp, grayscale, quality, originalSize, maxWidth = 0) {
   try {
-    let pipeline = sharp(input, { animated: false, failOn: "none", limitInputPixels: 40_000_000 }).rotate();
+    let pipeline = sharp(input, { animated: useWebp, failOn: "none", limitInputPixels: 40_000_000 }).rotate();
     if (maxWidth > 0) pipeline = pipeline.resize({ width: maxWidth, fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true });
     if (grayscale) pipeline = pipeline.grayscale();
     const output = useWebp
