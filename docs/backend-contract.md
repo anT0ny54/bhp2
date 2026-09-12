@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.1  
+**Version:** 2.2.3  
 **API:** 1  
 **Status:** Stable
 
@@ -59,7 +59,9 @@ X-Bytes-Saved: <bytes>
 ```
 
 If compression would make the representation larger, the original image bytes
-are returned instead and compressed/original size are equal.
+are returned instead and compressed/original size are equal. If the upstream
+omitted `Content-Type`, the fallback path detects the original image format
+before returning it so the response never labels original bytes as WebP/JPEG.
 
 ## Security
 
