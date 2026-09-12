@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.3
+- Fixed the no-savings fallback so original bytes keep their real media type.
+- Added format detection only on the rare missing-Content-Type fallback path.
+- Kept Bandwidth Guardian/Bandwidth Hero query and telemetry compatibility.
+
 ## 2.2.2
 
 - Lazy-load Sharp so the Bandwidth Hero compatibility handshake does not fail when the native image module cannot initialize.
