@@ -1,4 +1,4 @@
-const VERSION = "2.2.1";
+const VERSION = "2.2.2";
 const HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
@@ -19,6 +19,22 @@ export async function handler(event = {}) {
     };
   }
 
+  let sharpStatus = { available: false };
+  try {
+    const module = await import("sharp");
+    const sharp = module.default || module;
+    sharpStatus = {
+      available: true,
+      version: sharp.versions?.sharp || "unknown",
+      libvips: sharp.versions?.vips || "unknown",
+    };
+  } catch (error) {
+    sharpStatus = {
+      available: false,
+      error: error?.message || "Unable to load Sharp",
+    };
+  }
+
   return {
     statusCode: 200,
     headers: HEADERS,
@@ -27,6 +43,7 @@ export async function handler(event = {}) {
       service: "bandwidth-hero-proxy",
       version: VERSION,
       api: 1,
+      sharp: sharpStatus,
       features: ["webp", "grayscale", "maxwidth", "stats"],
     }),
   };

@@ -1,5 +1,3 @@
-import sharp from "sharp";
-
 import {
   INVALID_URL_ERROR,
   PRIVATE_HOST_ERROR,
@@ -17,7 +15,7 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.2.1";
+const PROXY_VERSION = "2.2.2";
 const API_VERSION = "1";
 
 const CORS_HEADERS = {
@@ -51,6 +49,24 @@ const PRIVATE_HOSTNAMES = new Set([
   "ip6-localhost",
   "ip6-loopback",
 ]);
+
+
+let sharpPromise;
+
+async function getSharp() {
+  if (!sharpPromise) {
+    sharpPromise = import("sharp").then((module) => module.default || module);
+  }
+  try {
+    return await sharpPromise;
+  } catch (error) {
+    sharpPromise = undefined;
+    const wrapped = new Error("Image processor is unavailable on the Netlify runtime.");
+    wrapped.statusCode = 503;
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
 
 const FORWARDED_REQUEST_HEADERS = [
   ["cookie", "cookie"],
@@ -278,6 +294,7 @@ function getSafeUpstreamHeaders(headers) {
 }
 
 async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
+  const sharp = await getSharp();
   // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
   // JPEG cannot. Never silently turn an animated image into a single frame.
   let pipeline = sharp(input, {
@@ -394,6 +411,7 @@ export async function handler(event = {}) {
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
     if (!useWebp && /^image\/(gif|webp|tiff)$/i.test(source.contentType || "")) {
+      const sharp = await getSharp();
       const metadata = await sharp(source.buffer, {
         animated: true,
         failOn: "none",
