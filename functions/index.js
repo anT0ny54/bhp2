@@ -17,7 +17,7 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.2.0";
+const PROXY_VERSION = "2.2.1";
 const API_VERSION = "1";
 
 const CORS_HEADERS = {
@@ -118,23 +118,29 @@ function parseBoolean(value) {
 
 function getRequestHeaders(event) {
   const input = event?.headers || {};
+  const normalized = Object.fromEntries(
+    Object.entries(input).map(([name, value]) => [String(name).toLowerCase(), value]),
+  );
   const headers = {
-    accept: input.accept || "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    accept: normalized.accept || "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "accept-encoding": "identity",
-    "user-agent": input["user-agent"] ||
+    "user-agent": normalized["user-agent"] ||
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-    "accept-language": input["accept-language"] || "en-US,en;q=0.9",
+    "accept-language": normalized["accept-language"] || "en-US,en;q=0.9",
   };
 
   for (const [source, target] of FORWARDED_REQUEST_HEADERS) {
-    if (input[source]) headers[target] = input[source];
+    if (normalized[source]) headers[target] = normalized[source];
   }
 
   return headers;
 }
 
 function hasCredentials(event) {
-  return Boolean(event?.headers?.cookie);
+  const input = event?.headers || {};
+  return Object.entries(input).some(
+    ([name, value]) => String(name).toLowerCase() === "cookie" && Boolean(value),
+  );
 }
 
 async function fetchWithDeadline(url, options, deadline) {
@@ -272,8 +278,10 @@ function getSafeUpstreamHeaders(headers) {
 }
 
 async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
+  // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
+  // JPEG cannot. Never silently turn an animated image into a single frame.
   let pipeline = sharp(input, {
-    animated: false,
+    animated: useWebp,
     failOn: "none",
     limitInputPixels: MAX_INPUT_PIXELS,
   }).rotate();
@@ -382,6 +390,27 @@ export async function handler(event = {}) {
   try {
     const source = await fetchImage(event, initial.toString());
     const originalSize = source.buffer.length;
+
+    // JPEG has no animation model. If WebP is unavailable to the client,
+    // preserve multi-frame sources instead of returning only the first frame.
+    if (!useWebp && /^image\/(gif|webp|tiff)$/i.test(source.contentType || "")) {
+      const metadata = await sharp(source.buffer, {
+        animated: true,
+        failOn: "none",
+        limitInputPixels: MAX_INPUT_PIXELS,
+      }).metadata();
+
+      if ((metadata.pages || 1) > 1) {
+        return createBinaryResponse(
+          source.buffer,
+          {
+            ...getSafeUpstreamHeaders(source.headers),
+            ...getOutputHeaders(source.contentType, originalSize, originalSize),
+          },
+          cacheHeaders,
+        );
+      }
+    }
 
     const compressed = await compressImage(
       source.buffer,
