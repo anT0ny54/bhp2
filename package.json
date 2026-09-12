@@ -12,13 +12,13 @@
     "test": "node --test tests/index.test.js tests/health.test.js"
   },
   "dependencies": {
-    "sharp": "^0.33.5"
+    "sharp": "0.33.5"
   },
   "devDependencies": {
-    "netlify-cli": "^17.0.0"
+    "netlify-cli": "17.38.1"
   },
   "engines": {
-    "node": ">=18.18.0"
+    "node": "22.23.2"
   },
   "keywords": [
     "bandwidth",
