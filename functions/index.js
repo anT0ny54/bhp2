@@ -15,7 +15,7 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.2.2";
+const PROXY_VERSION = "2.2.3";
 const API_VERSION = "1";
 
 const CORS_HEADERS = {
@@ -359,6 +359,34 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
   };
 }
 
+
+async function getDetectedImageContentType(buffer) {
+  try {
+    const sharp = await getSharp();
+    const metadata = await sharp(buffer, {
+      animated: true,
+      failOn: "none",
+      limitInputPixels: MAX_INPUT_PIXELS,
+    }).metadata();
+
+    const types = {
+      jpeg: "image/jpeg",
+      jpg: "image/jpeg",
+      png: "image/png",
+      webp: "image/webp",
+      gif: "image/gif",
+      tiff: "image/tiff",
+      avif: "image/avif",
+      heif: "image/heif",
+      heic: "image/heic",
+      jxl: "image/jxl",
+    };
+    return types[metadata.format] || "application/octet-stream";
+  } catch {
+    return "application/octet-stream";
+  }
+}
+
 export async function handler(event = {}) {
   const method = event.httpMethod || "GET";
 
@@ -440,12 +468,16 @@ export async function handler(event = {}) {
 
     if (compressed.length >= originalSize) {
       // Never make a client pay for a larger representation. Preserve the
-      // original bytes and original media type when compression is a loss.
+      // original bytes AND a real media type. Some CDNs omit Content-Type, so
+      // detect the format only on this uncommon fallback path.
+      const originalContentType =
+        source.contentType || await getDetectedImageContentType(source.buffer);
+
       return createBinaryResponse(
         source.buffer,
         {
           ...getSafeUpstreamHeaders(source.headers),
-          ...getOutputHeaders(source.contentType || "image/*", originalSize, originalSize),
+          ...getOutputHeaders(originalContentType, originalSize, originalSize),
         },
         cacheHeaders,
       );
