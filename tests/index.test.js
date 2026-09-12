@@ -427,6 +427,33 @@ test("uses public caching for requests without cookies", async () => {
   );
 });
 
+
+
+test("accepts case-insensitive request headers", async () => {
+  usePublicDnsForTests();
+
+  let receivedHeaders;
+  global.fetch = async (url, options) => {
+    receivedHeaders = options.headers;
+    return mockImageResponse();
+  };
+
+  const response = await handler(
+    makeEvent(
+      { url: "https://cdn.example/case.png" },
+      {
+        Cookie: "session=secret-value",
+        "User-Agent": "TestBrowser/1.0",
+      },
+    ),
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["cache-control"], "private, no-store");
+  assert.equal(receivedHeaders.cookie, "session=secret-value");
+  assert.equal(receivedHeaders["user-agent"], "TestBrowser/1.0");
+});
+
 test("supports JPEG output", async () => {
   usePublicDnsForTests();
 
