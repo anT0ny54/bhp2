@@ -1,6 +1,6 @@
 {
   "name": "bandwidth-hero-proxy2",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Bandwidth Hero-compatible image compression proxy optimized for Netlify Functions and mobile-friendly diagnostics",
   "type": "module",
   "main": "functions/index.js",
@@ -9,13 +9,15 @@
     "dev": "netlify dev --offline",
     "build": "npm run validate",
     "validate": "node --check functions/index.js && node --check functions/health.js && node --check util/validate.js && node --check util/fetch.js && node --check util/compress.js && node --check util/pick.js && node --check util/shouldCompress.js",
-    "test": "node --test tests/index.test.js tests/health.test.js"
+    "test": "node --test tests/index.test.js tests/health.test.js",
+    "check": "npm run validate && npm test",
+    "ci": "npm run check"
   },
   "dependencies": {
-    "sharp": "0.33.5"
+    "sharp": "0.35.4"
   },
   "devDependencies": {
-    "netlify-cli": "17.38.1"
+    "netlify-cli": "27.5.1"
   },
   "engines": {
     "node": "22.23.2"
@@ -34,5 +36,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/anT0ny54/bhp2"
-  }
+  },
+  "private": true,
+  "packageManager": "yarn@1.22.22"
 }

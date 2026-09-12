@@ -29,7 +29,8 @@ The service fetches remote images, converts them to WebP or JPEG using Sharp, op
 
 ## 🚀 Requirements
 
-- **Node.js** 18.18 or later
+- **Node.js** 22.13 or later (project deployment pins Node.js 22.23.2)
+- **Yarn Classic** 1.22.22 (the repository's `yarn.lock` is the authoritative lockfile)
 - **Netlify CLI** for local development
 - **Sharp** for image processing
 

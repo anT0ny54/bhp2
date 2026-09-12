@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.1
+- Updated dependency metadata to the current locked Sharp/Netlify CLI line.
+- Fixed case-insensitive request-header handling and DNS lookup timeout handling.
+- Preserved animated images when WebP is available instead of silently collapsing them to one frame.
+
 ## 2.2.0
 - Redesigned the public diagnostics/setup page for mobile and desktop.
 - Moved page CSS and JavaScript out of `index.html` for cleaner caching and maintenance.
