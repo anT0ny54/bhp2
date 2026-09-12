@@ -454,6 +454,59 @@ test("accepts case-insensitive request headers", async () => {
   assert.equal(receivedHeaders["user-agent"], "TestBrowser/1.0");
 });
 
+
+test("preserves the original media type when compression is larger", async () => {
+  usePublicDnsForTests();
+
+  // A tiny PNG is a common case where WebP overhead can exceed the source.
+  const tinyPng = await sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    },
+  }).png().toBuffer();
+
+  global.fetch = async () =>
+    new Response(tinyPng, {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    });
+
+  const response = await handler(
+    makeEvent({ url: "https://cdn.example/tiny.png" }),
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "image/png");
+  assert.equal(response.headers["x-original-size"], response.headers["x-compressed-size"]);
+});
+
+test("detects the original media type when upstream omits Content-Type", async () => {
+  usePublicDnsForTests();
+
+  const tinyPng = await sharp({
+    create: {
+      width: 1,
+      height: 1,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    },
+  }).png().toBuffer();
+
+  global.fetch = async () =>
+    new Response(tinyPng, { status: 200 });
+
+  const response = await handler(
+    makeEvent({ url: "https://cdn.example/tiny-no-type" }),
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["content-type"], "image/png");
+  assert.equal(response.headers["x-original-size"], response.headers["x-compressed-size"]);
+});
+
 test("supports JPEG output", async () => {
   usePublicDnsForTests();
 
