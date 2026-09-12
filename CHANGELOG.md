@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.2
+
+- Lazy-load Sharp so the Bandwidth Hero compatibility handshake does not fail when the native image module cannot initialize.
+- Add Sharp runtime diagnostics to `/api/health`.
+- Explicitly include Linux x64/arm64 Sharp runtime packages for Netlify Functions.
+- Return a clear 503 when the image processor cannot initialize.
+- Keep the existing Bandwidth Guardian API contract unchanged.
+
+
 ## 2.2.1
 - Updated dependency metadata to the current locked Sharp/Netlify CLI line.
 - Fixed case-insensitive request-header handling and DNS lookup timeout handling.

@@ -46,12 +46,17 @@ async function runDiagnostics() {
     let data = null;
     try { data = await health.json(); } catch {}
     const healthOk = health.ok && data?.status === "ok";
+    const sharpOk = data?.sharp?.available === true;
 
     setStatus(
       "reachable",
       healthOk ? "ok" : "fail",
       healthOk ? `API ${data.version ?? "unknown"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
     );
+
+    if (healthOk && !sharpOk) {
+      setStatus("compression", "fail", `Sharp unavailable: ${data?.sharp?.error || "runtime module missing"}`);
+    }
 
     if (!healthOk) {
       for (const [id] of diagnostics.slice(1)) setStatus(id, "fail", "Diagnostics stopped");

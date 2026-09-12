@@ -1,6 +1,6 @@
 {
   "name": "bandwidth-hero-proxy2",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Bandwidth Hero-compatible image compression proxy optimized for Netlify Functions and mobile-friendly diagnostics",
   "type": "module",
   "main": "functions/index.js",
@@ -38,5 +38,11 @@
     "url": "https://github.com/anT0ny54/bhp2"
   },
   "private": true,
-  "packageManager": "yarn@1.22.22"
+  "packageManager": "yarn@1.22.22",
+  "optionalDependencies": {
+    "@img/sharp-linux-x64": "0.35.4",
+    "@img/sharp-linux-arm64": "0.35.4",
+    "@img/sharp-libvips-linux-x64": "1.3.3",
+    "@img/sharp-libvips-linux-arm64": "1.3.3"
+  }
 }
