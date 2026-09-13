@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.3  
+**Version:** 2.2.5  
 **API:** 1  
 **Status:** Stable
 
@@ -47,7 +47,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.1
+X-BH-Version: 2.2.5
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -68,8 +68,12 @@ before returning it so the response never labels original bytes as WebP/JPEG.
 - Only HTTP and HTTPS URLs are accepted.
 - Localhost, loopback, RFC1918, link-local, CGNAT, multicast and other private
   address ranges are rejected.
-- DNS answers are checked before every upstream request.
-- Redirect destinations are validated again before fetching.
+- DNS answers are resolved and checked before every upstream request, and the
+  outbound connection is pinned to exactly those validated addresses (an
+  `undici` dispatcher with a custom resolver), so a hostname can't rebind to a
+  private address between the check and the connection.
+- Redirect destinations are re-resolved, re-checked, and re-pinned the same
+  way before each hop is fetched.
 - Upstream response headers are allow-listed.
 - Cookie-bearing requests use private, no-store caching.
 
