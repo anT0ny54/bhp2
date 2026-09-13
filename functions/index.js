@@ -1,9 +1,12 @@
+import { Agent } from "undici";
+
 import {
   INVALID_URL_ERROR,
   PRIVATE_HOST_ERROR,
   parseHttpUrl,
   isPrivateHost,
   resolveAndValidateRemoteUrl,
+  createPinnedLookup,
 } from "../util/validate.js";
 
 const DEFAULT_QUALITY = 40;
@@ -15,7 +18,7 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.2.3";
+const PROXY_VERSION = "2.2.5";
 const API_VERSION = "1";
 
 const CORS_HEADERS = {
@@ -41,15 +44,6 @@ const BASE_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };
-
-const PRIVATE_HOSTNAMES = new Set([
-  "localhost",
-  "localhost.localdomain",
-  "local",
-  "ip6-localhost",
-  "ip6-loopback",
-]);
-
 
 let sharpPromise;
 
@@ -159,6 +153,22 @@ function hasCredentials(event) {
   );
 }
 
+// Node's global fetch() (undici under the hood) re-resolves DNS itself at
+// connect time and ignores the legacy http(s).Agent option entirely, so a
+// DNS check performed beforehand doesn't actually constrain where fetch()
+// connects. Building an undici Agent with a custom connect.lookup and
+// passing it as fetch()'s `dispatcher` is the supported way to pin the
+// socket to addresses that have already been validated.
+function createPinnedDispatcher(addresses) {
+  return new Agent({
+    connect: { lookup: createPinnedLookup(addresses) },
+    // Each dispatcher is scoped to a single validated hop; there's nothing
+    // to gain from keeping its socket warm afterward.
+    keepAliveTimeout: 1_000,
+    keepAliveMaxTimeout: 1_000,
+  });
+}
+
 async function fetchWithDeadline(url, options, deadline) {
   const remaining = Math.max(1, deadline - Date.now());
   const controller = new AbortController();
@@ -232,6 +242,7 @@ async function fetchImage(event, initialUrl) {
       upstream = await fetchWithDeadline(validation.url, {
         method: "GET",
         headers: getRequestHeaders(event),
+        dispatcher: createPinnedDispatcher(validation.addresses),
       }, deadline);
     } catch (error) {
       if (error?.name === "AbortError") {

@@ -1,4 +1,4 @@
-const VERSION = "2.2.2";
+const VERSION = "2.2.5";
 const HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
