@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 
 import sharp from "sharp";
@@ -8,6 +9,8 @@ import { Agent } from "undici";
 import {
   handler,
 } from "../functions/index.js";
+import { handler as healthHandler } from "../functions/health.js";
+import { PROXY_VERSION } from "../util/version.js";
 
 import {
   isPrivateHost,
@@ -21,6 +24,33 @@ import {
 
 let originalFetch;
 let testImage;
+let photoLikeImage;
+
+// A flat solid color is a worst-case input for lossy formats: PNG's lossless
+// deflate shrinks it to nearly nothing, while JPEG/WebP still pay their
+// fixed container/table overhead, so lossy output can legitimately end up
+// *larger* than the PNG for such trivial content. Real-world "does this
+// image compress smaller" tests need pixel content with actual photographic
+// variance. This generates one deterministically (fixed seed, no external
+// fixture file) so the test suite stays hermetic and reproducible.
+function makePhotoLikePixels(width, height) {
+  const channels = 3;
+  const pixels = Buffer.alloc(width * height * channels);
+  let seed = 42;
+  const next = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = (y * width + x) * channels;
+      pixels[i] = Math.min(255, Math.floor((x / width) * 255 + next() * 40));
+      pixels[i + 1] = Math.min(255, Math.floor((y / height) * 255 + next() * 40));
+      pixels[i + 2] = Math.min(255, Math.floor(((x + y) / (width + height)) * 255 + next() * 40));
+    }
+  }
+  return pixels;
+}
 
 before(async () => {
   originalFetch = global.fetch;
@@ -36,6 +66,12 @@ before(async () => {
         b: 0,
       },
     },
+  })
+    .png()
+    .toBuffer();
+
+  photoLikeImage = await sharp(makePhotoLikePixels(128, 128), {
+    raw: { width: 128, height: 128, channels: 3 },
   })
     .png()
     .toBuffer();
@@ -450,6 +486,28 @@ test("compresses an image and returns protocol headers", async () => {
   );
 });
 
+test("keeps the proxy version in sync across package.json, health, and image responses", async () => {
+  // This project has drifted before: functions/health.js reported an older
+  // version than functions/index.js after a hand-copied string wasn't
+  // updated in both places (see CHANGELOG 2.2.4 and 2.2.6). PROXY_VERSION is
+  // now defined once in util/version.js and imported everywhere, but this
+  // test still guards package.json specifically, since that value can't be
+  // imported by the same mechanism and has to be kept in sync by hand.
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(packageJson.version, PROXY_VERSION);
+
+  const health = await healthHandler({ httpMethod: "GET" });
+  const healthBody = JSON.parse(health.body);
+  assert.equal(healthBody.version, PROXY_VERSION);
+
+  usePublicDnsForTests();
+  global.fetch = async () => mockImageResponse();
+  const response = await handler(makeEvent({ url: "https://cdn.example/image.png" }));
+  assert.equal(response.headers["x-bh-version"], PROXY_VERSION);
+});
+
 test("does not publicly cache requests containing cookies", async () => {
   usePublicDnsForTests();
 
@@ -533,7 +591,13 @@ test("accepts case-insensitive request headers", async () => {
 test("preserves the original media type when compression is larger", async () => {
   usePublicDnsForTests();
 
-  // A tiny PNG is a common case where WebP overhead can exceed the source.
+  // A 1x1 PNG is already near the format's minimum size. JPEG's fixed
+  // container overhead (JFIF header, Huffman/quantization tables) reliably
+  // exceeds that for any image this trivial, regardless of the installed
+  // libjpeg/mozjpeg minor version — unlike comparing against WebP, where an
+  // encoder's small-file heuristics (e.g. `minSize`) can vary the outcome
+  // between versions. Requesting `jpeg: "1"` keeps this test's outcome tied
+  // to that structural fact instead of an incidental encoder byte count.
   const tinyPng = await sharp({
     create: {
       width: 1,
@@ -550,7 +614,7 @@ test("preserves the original media type when compression is larger", async () =>
     });
 
   const response = await handler(
-    makeEvent({ url: "https://cdn.example/tiny.png" }),
+    makeEvent({ url: "https://cdn.example/tiny.png", jpeg: "1" }),
   );
 
   assert.equal(response.statusCode, 200);
@@ -561,6 +625,7 @@ test("preserves the original media type when compression is larger", async () =>
 test("detects the original media type when upstream omits Content-Type", async () => {
   usePublicDnsForTests();
 
+  // See the previous test for why `jpeg: "1"` is used against a 1x1 PNG.
   const tinyPng = await sharp({
     create: {
       width: 1,
@@ -574,7 +639,7 @@ test("detects the original media type when upstream omits Content-Type", async (
     new Response(tinyPng, { status: 200 });
 
   const response = await handler(
-    makeEvent({ url: "https://cdn.example/tiny-no-type" }),
+    makeEvent({ url: "https://cdn.example/tiny-no-type", jpeg: "1" }),
   );
 
   assert.equal(response.statusCode, 200);
@@ -585,8 +650,15 @@ test("detects the original media type when upstream omits Content-Type", async (
 test("supports JPEG output", async () => {
   usePublicDnsForTests();
 
+  // A photo-like fixture is used here (rather than the flat-color
+  // `testImage`) because a solid color is a worst case for lossy formats:
+  // PNG's lossless deflate shrinks it to near nothing, while JPEG still pays
+  // its fixed table/header overhead, so JPEG output can legitimately end up
+  // larger than the PNG for such trivial content — that's exactly what the
+  // "preserves the original media type" tests above verify. This test wants
+  // the ordinary case, where JPEG compression actually reduces size.
   global.fetch = async () =>
-    mockImageResponse();
+    mockImageResponse(photoLikeImage);
 
   const response = await handler(
     makeEvent({
