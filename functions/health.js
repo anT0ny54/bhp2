@@ -1,4 +1,5 @@
-const VERSION = "2.2.5";
+import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
+
 const HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
@@ -41,10 +42,10 @@ export async function handler(event = {}) {
     body: JSON.stringify({
       status: "ok",
       service: "bandwidth-hero-proxy",
-      version: VERSION,
-      api: 1,
+      version: PROXY_VERSION,
+      api: Number(API_VERSION),
       sharp: sharpStatus,
-      features: ["webp", "grayscale", "maxwidth", "stats"],
+      features: FEATURES,
     }),
   };
 }

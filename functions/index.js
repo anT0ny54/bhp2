@@ -8,6 +8,7 @@ import {
   resolveAndValidateRemoteUrl,
   createPinnedLookup,
 } from "../util/validate.js";
+import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
 
 const DEFAULT_QUALITY = 40;
 const DEFAULT_MAX_WIDTH = 0;
@@ -17,9 +18,7 @@ const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
-const MAX_FUNCTION_OUTPUT_BYTES = 4_400_000;
-const PROXY_VERSION = "2.2.5";
-const API_VERSION = "1";
+const MAX_FUNCTION_OUTPUT_BYTES = 4_300_000;
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -30,8 +29,8 @@ const CORS_HEADERS = {
 // Browser cache is deliberately short-lived because extension settings are
 // encoded into the URL. Netlify's CDN keeps the expensive compressed result.
 const PUBLIC_CACHE_HEADERS = {
-  "cache-control": "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400",
-  "netlify-cdn-cache-control": "public, durable, s-maxage=604800, stale-while-revalidate=86400",
+  "cache-control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800",
+  "netlify-cdn-cache-control": "public, durable, s-maxage=2592000, stale-while-revalidate=604800",
   "netlify-vary": "query=url|quality|bw|jpeg|max_width|l",
 };
 
@@ -112,9 +111,20 @@ function getImageUrl(value) {
 }
 
 function normalizeImageUrl(value) {
-  return getImageUrl(value)
+  const raw = getImageUrl(value)
     .trim()
     .replace(/^http:\/\/1\.1\.\d+\.\d+\/bmi\/(https?:\/\/)?/i, "http://");
+
+  // Fragments are never sent in HTTP requests. Dropping them makes equivalent
+  // proxy requests share the same CDN/browser cache entry instead of creating
+  // duplicate compressed variants.
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return raw;
+  }
 }
 
 function parseInteger(value, fallback, min, max) {
@@ -126,11 +136,18 @@ function parseBoolean(value) {
   return value === "1" || value === "true";
 }
 
-function getRequestHeaders(event) {
+// Client-supplied header names arrive with whatever casing the caller used.
+// Normalizing them once here means both the cookie check and the upstream
+// header builder below read from the same lower-cased view instead of each
+// re-scanning and re-lowercasing event.headers independently.
+function getNormalizedHeaders(event) {
   const input = event?.headers || {};
-  const normalized = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries(input).map(([name, value]) => [String(name).toLowerCase(), value]),
   );
+}
+
+function buildUpstreamHeaders(normalized) {
   const headers = {
     accept: normalized.accept || "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     "accept-encoding": "identity",
@@ -146,11 +163,8 @@ function getRequestHeaders(event) {
   return headers;
 }
 
-function hasCredentials(event) {
-  const input = event?.headers || {};
-  return Object.entries(input).some(
-    ([name, value]) => String(name).toLowerCase() === "cookie" && Boolean(value),
-  );
+function hasCredentials(normalized) {
+  return Boolean(normalized.cookie);
 }
 
 // Node's global fetch() (undici under the hood) re-resolves DNS itself at
@@ -225,9 +239,13 @@ async function readLimitedBody(response) {
   return Buffer.concat(chunks, total);
 }
 
-async function fetchImage(event, initialUrl) {
+async function fetchImage(normalizedHeaders, initialUrl) {
   let currentUrl = initialUrl;
   const deadline = Date.now() + FETCH_TIMEOUT_MS;
+  // The forwarded request headers come from the original client request and
+  // don't change across redirect hops, so build them once instead of on
+  // every iteration of the loop below.
+  const upstreamHeaders = buildUpstreamHeaders(normalizedHeaders);
 
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     const validation = await resolveAndValidateRemoteUrl(currentUrl);
@@ -241,7 +259,7 @@ async function fetchImage(event, initialUrl) {
     try {
       upstream = await fetchWithDeadline(validation.url, {
         method: "GET",
-        headers: getRequestHeaders(event),
+        headers: upstreamHeaders,
         dispatcher: createPinnedDispatcher(validation.addresses),
       }, deadline);
     } catch (error) {
@@ -320,8 +338,19 @@ async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
   if (grayscale) pipeline = pipeline.grayscale();
 
   return useWebp
-    ? pipeline.webp({ quality, effort: 4, smartSubsample: true }).toBuffer()
-    : pipeline.jpeg({ quality, progressive: true, mozjpeg: true, chromaSubsampling: "4:2:0" }).toBuffer();
+    ? pipeline.webp({
+        quality,
+        effort: 6,
+        smartSubsample: true,
+        minSize: true,
+        mixed: true,
+      }).toBuffer()
+    : pipeline.jpeg({
+        quality,
+        progressive: true,
+        mozjpeg: true,
+        chromaSubsampling: "4:2:0",
+      }).toBuffer();
 }
 
 async function compressImage(input, useWebp, grayscale, quality, maxWidth) {
@@ -359,7 +388,7 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
     "x-bh-backend": "bandwidth-proxy-2",
     "x-bh-version": PROXY_VERSION,
     "x-bh-api": API_VERSION,
-    "x-bh-features": "webp,grayscale,maxwidth,stats",
+    "x-bh-features": FEATURES.join(","),
     "x-bh-original-size": String(originalSize),
     "x-bh-compressed-size": String(compressedSize),
     "x-bh-bytes-saved": String(saved),
@@ -441,10 +470,11 @@ export async function handler(event = {}) {
   const grayscale = parseBoolean(query.bw);
   const quality = parseInteger(query.quality ?? query.l, DEFAULT_QUALITY, 1, 100);
   const maxWidth = parseInteger(query.max_width, DEFAULT_MAX_WIDTH, 0, 8192);
-  const cacheHeaders = hasCredentials(event) ? PRIVATE_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
+  const normalizedHeaders = getNormalizedHeaders(event);
+  const cacheHeaders = hasCredentials(normalizedHeaders) ? PRIVATE_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
 
   try {
-    const source = await fetchImage(event, initial.toString());
+    const source = await fetchImage(normalizedHeaders, initial.toString());
     const originalSize = source.buffer.length;
 
     // JPEG has no animation model. If WebP is unavailable to the client,
