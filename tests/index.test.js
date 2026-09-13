@@ -3,6 +3,8 @@ import { after, before, test } from "node:test";
 
 import sharp from "sharp";
 
+import { Agent } from "undici";
+
 import {
   handler,
 } from "../functions/index.js";
@@ -14,6 +16,7 @@ import {
   setDnsLookupForTests,
   validateRemoteUrl,
   resolveAndValidateRemoteUrl,
+  createPinnedLookup,
 } from "../util/validate.js";
 
 let originalFetch;
@@ -235,6 +238,78 @@ test("allows a hostname resolving only to public addresses", async () => {
   assert.equal(
     result.url,
     "https://cdn.example/image.jpg"
+  );
+});
+
+test("resolveAndValidateRemoteUrl exposes the validated addresses for pinning", async () => {
+  setDnsLookupForTests(async () => [
+    { address: "93.184.216.34", family: 4 },
+    { address: "2001:db8::1", family: 6 },
+  ]);
+
+  const result = await resolveAndValidateRemoteUrl(
+    "https://cdn.example/image.jpg"
+  );
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.addresses, [
+    { address: "93.184.216.34", family: 4 },
+    { address: "2001:db8::1", family: 6 },
+  ]);
+});
+
+test("createPinnedLookup always answers with the pinned addresses, never a live query", async () => {
+  const lookup = createPinnedLookup([
+    { address: "93.184.216.34", family: 4 },
+    { address: "2001:db8::1", family: 6 },
+  ]);
+
+  await new Promise((resolve, reject) => {
+    lookup("attacker-controlled.example", { all: true }, (err, addresses) => {
+      try {
+        assert.equal(err, null);
+        assert.deepEqual(addresses, [
+          { address: "93.184.216.34", family: 4 },
+          { address: "2001:db8::1", family: 6 },
+        ]);
+        resolve();
+      } catch (assertionError) {
+        reject(assertionError);
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    lookup("attacker-controlled.example", { family: 6 }, (err, address, family) => {
+      try {
+        assert.equal(err, null);
+        assert.equal(address, "2001:db8::1");
+        assert.equal(family, 6);
+        resolve();
+      } catch (assertionError) {
+        reject(assertionError);
+      }
+    });
+  });
+});
+
+test("pins the outbound fetch to a dispatcher built from the validated addresses", async () => {
+  usePublicDnsForTests();
+
+  let capturedDispatcher;
+  global.fetch = async (url, options) => {
+    capturedDispatcher = options?.dispatcher;
+    return mockImageResponse();
+  };
+
+  const response = await handler(
+    makeEvent({ url: "https://cdn.example/image.jpg" })
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.ok(
+    capturedDispatcher instanceof Agent,
+    "expected fetch to be called with an undici Agent dispatcher pinned to the validated addresses"
   );
 });
 
