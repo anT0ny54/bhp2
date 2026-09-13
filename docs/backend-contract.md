@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.5  
+**Version:** 2.2.7  
 **API:** 1  
 **Status:** Stable
 
@@ -47,7 +47,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.5
+X-BH-Version: 2.2.7
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -79,11 +79,11 @@ before returning it so the response never labels original bytes as WebP/JPEG.
 
 ## Caching
 
-Public requests use a one-hour browser cache and a seven-day Netlify CDN cache:
+Public requests use a 24-hour browser cache and a 30-day Netlify CDN cache:
 
 ```text
-Cache-Control: public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400
-Netlify-CDN-Cache-Control: public, durable, s-maxage=604800, stale-while-revalidate=86400
+Cache-Control: public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800
+Netlify-CDN-Cache-Control: public, durable, s-maxage=2592000, stale-while-revalidate=604800
 Netlify-Vary: query=url|quality|bw|jpeg|max_width|l
 ```
 
@@ -96,7 +96,7 @@ including its native `@img` packages. Sharp optional dependencies must remain
 enabled during installation.
 
 Netlify's buffered synchronous function responses are limited to 6 MB. Because
-binary Lambda-style responses are base64 encoded, this build keeps optimized
-image output below a 4.4 MB binary safety target when necessary. Normal images
-are unaffected; only oversized outputs enter the adaptive quality/resize
-fallback.
+binary Lambda-style responses are base64 encoded (~30% overhead), this build
+keeps optimized image output below a 4.3 MB binary safety target when
+necessary. Normal images are unaffected; only oversized outputs enter the
+adaptive quality/resize fallback.
