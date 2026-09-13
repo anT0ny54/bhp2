@@ -61,3 +61,17 @@ If you'd like to support the development, donations are appreciated:
 **Bitcoin:** `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
 
 ---
+
+
+## 2.2.6 optimization profile
+
+- WebP uses Sharp effort 6 for smaller output and enables animated-WebP `minSize`/`mixed` optimization.
+- Equivalent upstream URLs with URL fragments share one proxy/cache key because HTTP fragments are not transmitted to the origin.
+- Successful public image responses are browser-cacheable for 24 hours and edge-cacheable for 30 days with stale-while-revalidate.
+- The binary safety target is 4.3 MB to stay below Netlify's ~4.5 MB effective buffered binary ceiling after Base64 overhead.
+
+## 2.2.7 maintenance pass
+
+- `PROXY_VERSION`/`API_VERSION`/`FEATURES` now live in one place (`util/version.js`) instead of being hand-copied into `functions/index.js`, `functions/health.js`, and `package.json` — the drift between those files that happened in both 2.2.4 and 2.2.6 can't recur silently, and a test now asserts they stay in sync.
+- Upstream request headers are built once per request instead of being rebuilt on every redirect hop.
+- No query parameters, response headers, or client-visible behavior changed.
