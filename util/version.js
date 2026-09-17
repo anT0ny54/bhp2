@@ -6,6 +6,6 @@
 // version string was hand-copied into more than one file. Importing these
 // constants everywhere they're needed removes the duplication that caused
 // the drift, rather than just re-syncing the numbers one more time.
-export const PROXY_VERSION = "2.2.7";
+export const PROXY_VERSION = "2.2.8";
 export const API_VERSION = "1";
 export const FEATURES = Object.freeze(["webp", "grayscale", "maxwidth", "stats"]);
