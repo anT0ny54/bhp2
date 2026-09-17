@@ -94,6 +94,15 @@ function getQueryParameters(event) {
   return event?.queryStringParameters || {};
 }
 
+// `url` is normally a single query-string value, but this also has to cope
+// with a legacy-client bug: extensions that build the proxy URL without
+// encodeURIComponent()-ing the upstream image URL will leak that upstream
+// URL's own "?a=b&c=d" query params into the *outer* query string. Netlify
+// then parses those as repeated `url` params (an array) or, in some
+// gateways, `value` itself arrives pre-joined as one string. Rejoining with
+// "&url=" reconstructs the original nested query string instead of only
+// keeping the first fragment before the unencoded "&". The JSON.parse branch
+// handles the same array shape when it arrives JSON-encoded instead.
 function getImageUrl(value) {
   if (!value) return "";
 
