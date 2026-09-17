@@ -36,15 +36,86 @@ The service fetches remote images, converts them to WebP or JPEG using Sharp, op
 
 ---
 
+# Contributing Guidelines
+
+Thank you for considering contributing to **Bandwidth Hero Proxy 2**! This project is guided by a singular, focused mission:
+
+> **"The easiest, most reliable, free, one-click deployable Bandwidth Hero proxy that anyone can deploy in minutes."**
+
+---
+
+## 🧭 Engineering Principles
+
+Every proposed change or pull request should satisfy at least one of the following criteria:
+* **Makes deployment easier**: Reduces friction or setup steps for new users.
+* **Improves reliability**: Hardens error handling, edge cases, timeouts, or security boundaries.
+* **Improves compatibility**: Fixes issues with legacy/modern browser extensions or legitimate image CDNs.
+* **Improves performance without increasing complexity**: Speeds up cold starts or reduces response latency without adding layers of abstractions.
+* **Reduces maintenance burden**: Cleans up obsolete parameters, dead code, or refactors safely.
+
+If a proposed change satisfies none of these, it will not be accepted.
+
+### Implementation Preferences:
+1. **Prefer simpler code** over clever abstractions.
+2. **Prefer fewer dependencies** to keep the footprint tiny.
+3. **Prefer backward compatibility** at all times to prevent breaking active client extensions.
+4. **Prefer serverless-first solutions** matching free tier environments.
+5. **Benchmark before optimizing**. Do not optimize based on assumptions.
+
+---
+
+## 📦 Dependency Policy
+
+This project's greatest asset is its minimal size. 
+- **Justification**: Adding any third-party dependency requires clear justification and demonstration of a major benefit that cannot reasonably be achieved with Node's standard library.
+- **Preference**: Removing or inlining custom utilities is preferred over adding packages.
+- **Standard Library**: Always prefer native Node.js functionality (e.g., global `Fetch API`, `AbortController`, `Buffer`) over third-party equivalents.
+
+---
+
+## 🏷️ Release Policy
+
+- **Patch releases**: Strictly for bug fixes, security patches (e.g. SSRF updates), latency improvements, and internal code cleanups.
+- **Minor releases**: Adding optional configuration features (e.g. environment variables), new diagnostic tools, or updating documentation.
+- **Major releases**: Required only for breaking changes to:
+  - The API boundaries.
+  - Query parameter interfaces.
+  - Base64/response format specifications.
+  - Overall deployment processes.
+
+---
+
+## 🧪 Testing Guidelines
+
+Before opening a PR, ensure all tests pass:
+```bash
+npm test
+```
+
+All contributions that alter request handling or add features must include tests matching one of these categories:
+- **Compatibility tests**: Validate that legacy and modern extension requests behave identically.
+- **Security tests**: Test host validation blocks (SSRF) and redirect traversal filters.
+- **Image pipeline tests**: Verify aspect-ratio resizing, grayscale output, and formats.
+
+> [!NOTE]
+> **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname via DNS, rejects the request if any resolved address is private, and pins the outbound connection to exactly those validated addresses via an `undici` `Agent` with a custom `connect.lookup` (`createPinnedDispatcher` in `functions/index.js`). This closes the standard DNS-rebinding TOCTOU gap: Node's built-in `fetch()` ignores the legacy `http(s).Agent` option and always re-resolves the hostname itself at connect time, so a check performed beforehand doesn't otherwise constrain where the connection actually goes. Each redirect hop is re-resolved, re-checked, and re-pinned the same way. This is the one accepted exception to the Dependency Policy's "no new dependencies" preference above: there is no supported way to pin a `fetch()` connection using only Node's standard library, so `undici` — the library that already powers `fetch()` internally — is a direct dependency for this specific purpose.
+
 ## 🔒 Recommended DNS Configuration
 
-For optimal security and ad-blocking, configure your DNS with **My Free DNS**:
+For ad/tracker blocking alongside this proxy, you can point your device or
+browser at a DNS-over-HTTPS resolver running the **HaGeZi Multi Pro + TIF**
+blocklist via **My Free DNS**. The same blocklist is mirrored at three
+independent endpoints — pick whichever is fastest/most reliable from your
+network; they're interchangeable, not tiered:
 
-| Blocklist | DNS-over-HTTPS Endpoint |
-|-----------|------------------------|
-| **HaGeZi Multi Pro + TIF** | `https://freedns.koyeb.app/dns-query` ✅ |
-| **HaGeZi Multi Pro + TIF** | `https://freedns-six.vercel.app/api/doh/dns-query` ✅ |
-| **HaGeZi Multi Pro + TIF** | `https://dnssix.netlify.app/api/doh/dns-query` |
+- `https://freedns.koyeb.app/dns-query`
+- `https://freedns-six.vercel.app/api/doh/dns-query`
+- `https://dnssix.netlify.app/api/doh/dns-query
+- `https://dns-93aca.containers.snapdeploy.app/dns-query`
+
+This is unrelated to the proxy's own DNS-rebinding protection (see
+[`docs/backend-contract.md`](docs/backend-contract.md#security)), which
+always applies regardless of which resolver your client uses.
 
 ---
 
@@ -63,15 +134,12 @@ If you'd like to support the development, donations are appreciated:
 ---
 
 
-## 2.2.6 optimization profile
+## 📋 Release history
 
-- WebP uses Sharp effort 6 for smaller output and enables animated-WebP `minSize`/`mixed` optimization.
-- Equivalent upstream URLs with URL fragments share one proxy/cache key because HTTP fragments are not transmitted to the origin.
-- Successful public image responses are browser-cacheable for 24 hours and edge-cacheable for 30 days with stale-while-revalidate.
-- The binary safety target is 4.3 MB to stay below Netlify's ~4.5 MB effective buffered binary ceiling after Base64 overhead.
+Current version: **2.2.8**. Full release notes for every version live in
+[`CHANGELOG.md`](CHANGELOG.md) — kept there only, not duplicated here, since
+maintaining the same version history in two files is exactly the kind of
+drift that caused the version-string bug fixed in 2.2.4 and again in 2.2.7.
 
-## 2.2.7 maintenance pass
-
-- `PROXY_VERSION`/`API_VERSION`/`FEATURES` now live in one place (`util/version.js`) instead of being hand-copied into `functions/index.js`, `functions/health.js`, and `package.json` — the drift between those files that happened in both 2.2.4 and 2.2.6 can't recur silently, and a test now asserts they stay in sync.
-- Upstream request headers are built once per request instead of being rebuilt on every redirect hop.
-- No query parameters, response headers, or client-visible behavior changed.
+For the full API contract (query parameters, response headers, caching and
+security behavior), see [`docs/backend-contract.md`](docs/backend-contract.md).
