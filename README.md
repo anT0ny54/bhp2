@@ -109,8 +109,8 @@ independent endpoints — pick whichever is fastest/most reliable from your
 network; they're interchangeable, not tiered:
 
 - `https://freedns.koyeb.app/dns-query`
-- `https://freedns-six.vercel.app/api/doh/dns-query`
-- `https://dnssix.netlify.app/api/doh/dns-query
+- `https://dns-pi.vercel.app/api/doh/dns-query`
+- `https://dnssix.netlify.app/api/doh/dns-query'
 - `https://dns-93aca.containers.snapdeploy.app/dns-query`
 
 This is unrelated to the proxy's own DNS-rebinding protection (see
