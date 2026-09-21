@@ -58,14 +58,18 @@ function isPrivateIpv6(value) {
   const allZero = groups.every((x) => x === 0);
   const loopback = groups.slice(0, 7).every((x) => x === 0) && groups[7] === 1;
   const first16 = groups[0];
-  const linkLocal = first16 >= 0xfe80 && first16 <= 0xfebf;
+  // fe80::/10 link-local plus the deprecated fec0::/10 site-local range.
+  const linkLocal = first16 >= 0xfe80 && first16 <= 0xfeff;
   const uniqueLocal = first16 >= 0xfc00 && first16 <= 0xfdff;
   const multicast = first16 >= 0xff00 && first16 <= 0xffff;
+  const toIpv4 = (high, low) => [high >>> 8, high & 255, low >>> 8, low & 255].join(".");
   const mapped = groups.slice(0, 5).every((x) => x === 0) && groups[5] === 0xffff;
-  if (mapped) {
-    const ip = [groups[6] >>> 8, groups[6] & 255, groups[7] >>> 8, groups[7] & 255].join(".");
-    return isPrivateIpv4(ip);
-  }
+  if (mapped) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed an IPv4 address that a
+  // gateway would forward to, so judge them by the embedded address.
+  const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((x) => x === 0);
+  if (nat64) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+  if (first16 === 0x2002) return isPrivateIpv4(toIpv4(groups[1], groups[2]));
   return allZero || loopback || linkLocal || uniqueLocal || multicast;
 }
 
@@ -105,15 +109,19 @@ export async function resolveAndValidateRemoteUrl(value) {
 
   const hostname = new URL(validation.url).hostname;
   let records;
+  let timer;
   try {
     records = await Promise.race([
       dnsLookup(hostname),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("DNS_TIMEOUT")), DNS_LOOKUP_TIMEOUT_MS)
-      ),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), DNS_LOOKUP_TIMEOUT_MS);
+      }),
     ]);
   } catch {
     return { valid: false, error: DNS_RESOLUTION_ERROR, statusCode: 502 };
+  } finally {
+    // Don't leave a dangling timer per request once the lookup has settled.
+    clearTimeout(timer);
   }
 
   if (
