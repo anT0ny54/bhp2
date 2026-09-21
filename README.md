@@ -110,7 +110,7 @@ network; they're interchangeable, not tiered:
 
 - `https://freedns.koyeb.app/dns-query`
 - `https://dns-pi.vercel.app/api/doh/dns-query`
-- `https://dnssix.netlify.app/api/doh/dns-query'
+- `https://dnssix.netlify.app/api/doh/dns-query`
 - `https://dns-93aca.containers.snapdeploy.app/dns-query`
 
 This is unrelated to the proxy's own DNS-rebinding protection (see
@@ -136,10 +136,10 @@ If you'd like to support the development, donations are appreciated:
 
 ## 📋 Release history
 
-Current version: **2.2.8**. Full release notes for every version live in
+Current version: **2.2.9**. Full release notes for every version live in
 [`CHANGELOG.md`](CHANGELOG.md) — kept there only, not duplicated here, since
 maintaining the same version history in two files is exactly the kind of
-drift that caused the version-string bug fixed in 2.2.4 and again in 2.2.7.
+drift that caused the version-string version-string bug fixed more than once.
 
 For the full API contract (query parameters, response headers, caching and
 security behavior), see [`docs/backend-contract.md`](docs/backend-contract.md).

@@ -47,6 +47,7 @@ async function runDiagnostics() {
     try { data = await health.json(); } catch {}
     const healthOk = health.ok && data?.status === "ok";
     const sharpOk = data?.sharp?.available === true;
+    const sharpError = `Sharp unavailable: ${data?.sharp?.error || "runtime module missing"}`;
 
     setStatus(
       "reachable",
@@ -55,7 +56,7 @@ async function runDiagnostics() {
     );
 
     if (healthOk && !sharpOk) {
-      setStatus("compression", "fail", `Sharp unavailable: ${data?.sharp?.error || "runtime module missing"}`);
+      setStatus("compression", "fail", sharpError);
     }
 
     if (!healthOk) {
@@ -86,7 +87,7 @@ async function runDiagnostics() {
     const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
     const ratio = original > 0 ? `${((saved / original) * 100).toFixed(1)}% saved` : "size telemetry unavailable";
     const compressedOk = image.ok && type.startsWith("image/") && original > 0;
-    setStatus("compression", compressedOk ? "ok" : "fail", compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : `HTTP ${image.status}`);
+    setStatus("compression", compressedOk ? "ok" : "fail", compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : sharpOk ? `HTTP ${image.status}` : sharpError);
 
     const cache = image.headers.get("cache-control") || "";
     const cacheOk = /^public,/i.test(cache);
