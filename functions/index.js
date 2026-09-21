@@ -61,13 +61,9 @@ async function getSharp() {
   }
 }
 
-const FORWARDED_REQUEST_HEADERS = [
-  ["cookie", "cookie"],
-  ["dnt", "dnt"],
-  ["referer", "referer"],
-  ["user-agent", "user-agent"],
-  ["accept-language", "accept-language"],
-];
+// user-agent and accept-language are handled with defaults in
+// buildUpstreamHeaders, so only the pass-through-only headers are listed here.
+const FORWARDED_REQUEST_HEADERS = ["cookie", "dnt", "referer"];
 
 function createResponse(statusCode, body = "", headers = {}) {
   return {
@@ -165,8 +161,8 @@ function buildUpstreamHeaders(normalized) {
     "accept-language": normalized["accept-language"] || "en-US,en;q=0.9",
   };
 
-  for (const [source, target] of FORWARDED_REQUEST_HEADERS) {
-    if (normalized[source]) headers[target] = normalized[source];
+  for (const name of FORWARDED_REQUEST_HEADERS) {
+    if (normalized[name]) headers[name] = normalized[name];
   }
 
   return headers;
@@ -192,20 +188,9 @@ function createPinnedDispatcher(addresses) {
   });
 }
 
-async function fetchWithDeadline(url, options, deadline) {
-  const remaining = Math.max(1, deadline - Date.now());
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), remaining);
-
-  try {
-    return await fetch(url, {
-      ...options,
-      redirect: "manual",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+async function discardBody(response) {
+  // Free the pinned socket for responses we won't read (redirects, errors).
+  try { await response.body?.cancel(); } catch { /* already closed */ }
 }
 
 async function readLimitedBody(response) {
@@ -250,76 +235,100 @@ async function readLimitedBody(response) {
 
 async function fetchImage(normalizedHeaders, initialUrl) {
   let currentUrl = initialUrl;
-  const deadline = Date.now() + FETCH_TIMEOUT_MS;
-  // The forwarded request headers come from the original client request and
-  // don't change across redirect hops, so build them once instead of on
-  // every iteration of the loop below.
-  const upstreamHeaders = buildUpstreamHeaders(normalizedHeaders);
+  // Forwarded request headers don't change across hops, except that
+  // credentials are dropped when a redirect leaves the original origin.
+  let upstreamHeaders = buildUpstreamHeaders(normalizedHeaders);
+  const dispatchers = [];
+  // One deadline covers every hop AND the body download, so a slow-drip
+  // upstream can't outlive the timeout once its headers have arrived.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const validation = await resolveAndValidateRemoteUrl(currentUrl);
-    if (!validation.valid) {
-      const error = new Error(validation.error);
-      error.statusCode = validation.statusCode || 403;
-      throw error;
-    }
-
-    let upstream;
-    try {
-      upstream = await fetchWithDeadline(validation.url, {
-        method: "GET",
-        headers: upstreamHeaders,
-        dispatcher: createPinnedDispatcher(validation.addresses),
-      }, deadline);
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        const timeout = new Error("Upstream image request timed out.");
-        timeout.statusCode = 504;
-        throw timeout;
-      }
-      throw error;
-    }
-
-    const location = upstream.headers.get("location");
-    if (upstream.status >= 300 && upstream.status < 400 && location) {
-      if (redirect === MAX_REDIRECTS) {
-        const error = new Error("Too many upstream redirects.");
-        error.statusCode = 508;
+  try {
+    for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+      const validation = await resolveAndValidateRemoteUrl(currentUrl);
+      if (!validation.valid) {
+        const error = new Error(validation.error);
+        error.statusCode = validation.statusCode || 403;
         throw error;
       }
-      currentUrl = new URL(location, validation.url).toString();
-      continue;
+
+      const dispatcher = createPinnedDispatcher(validation.addresses);
+      dispatchers.push(dispatcher);
+      const upstream = await fetch(validation.url, {
+        method: "GET",
+        headers: upstreamHeaders,
+        dispatcher,
+        redirect: "manual",
+        signal: controller.signal,
+      });
+
+      const location = upstream.headers.get("location");
+      if (upstream.status >= 300 && upstream.status < 400 && location) {
+        await discardBody(upstream);
+        if (redirect === MAX_REDIRECTS) {
+          const error = new Error("Too many upstream redirects.");
+          error.statusCode = 508;
+          throw error;
+        }
+        let next;
+        try {
+          next = new URL(location, validation.url);
+        } catch {
+          const error = new Error("Upstream sent an invalid redirect location.");
+          error.statusCode = 502;
+          throw error;
+        }
+        if (next.origin !== new URL(validation.url).origin) {
+          const { cookie, ...withoutCookie } = upstreamHeaders;
+          upstreamHeaders = withoutCookie;
+        }
+        currentUrl = next.toString();
+        continue;
+      }
+
+      if (!upstream.ok) {
+        await discardBody(upstream);
+        const error = new Error(`Upstream image request failed with status ${upstream.status}.`);
+        error.statusCode = upstream.status >= 400 ? upstream.status : 502;
+        throw error;
+      }
+
+      const contentType = (upstream.headers.get("content-type") || "")
+        .split(";", 1)[0]
+        .trim()
+        .toLowerCase();
+
+      // Keep compatibility with CDNs that omit Content-Type. Sharp will validate
+      // the actual bytes below. Explicit non-image responses are rejected early.
+      if (contentType && !contentType.startsWith("image/")) {
+        await discardBody(upstream);
+        const error = new Error(`Upstream returned a non-image response (${contentType}).`);
+        error.statusCode = 415;
+        throw error;
+      }
+
+      return {
+        buffer: await readLimitedBody(upstream),
+        contentType,
+        headers: upstream.headers,
+      };
     }
 
-    if (!upstream.ok) {
-      const error = new Error(`Upstream image request failed with status ${upstream.status}.`);
-      error.statusCode = upstream.status >= 400 ? upstream.status : 502;
-      throw error;
+    const error = new Error("Unable to fetch image.");
+    error.statusCode = 502;
+    throw error;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeout = new Error("Upstream image request timed out.");
+      timeout.statusCode = 504;
+      throw timeout;
     }
-
-    const contentType = (upstream.headers.get("content-type") || "")
-      .split(";", 1)[0]
-      .trim()
-      .toLowerCase();
-
-    // Keep compatibility with CDNs that omit Content-Type. Sharp will validate
-    // the actual bytes below. Explicit non-image responses are rejected early.
-    if (contentType && !contentType.startsWith("image/")) {
-      const error = new Error(`Upstream returned a non-image response (${contentType}).`);
-      error.statusCode = 415;
-      throw error;
-    }
-
-    return {
-      buffer: await readLimitedBody(upstream),
-      contentType,
-      headers: upstream.headers,
-    };
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    for (const dispatcher of dispatchers) dispatcher.destroy().catch(() => {});
   }
-
-  const error = new Error("Unable to fetch image.");
-  error.statusCode = 502;
-  throw error;
 }
 
 function getSafeUpstreamHeaders(headers) {
@@ -477,7 +486,7 @@ export async function handler(event = {}) {
 
   const useWebp = query.jpeg !== "1";
   const grayscale = parseBoolean(query.bw);
-  const quality = parseInteger(query.quality ?? query.l, DEFAULT_QUALITY, 1, 100);
+  const quality = parseInteger(query.quality || query.l, DEFAULT_QUALITY, 1, 100);
   const maxWidth = parseInteger(query.max_width, DEFAULT_MAX_WIDTH, 0, 8192);
   const normalizedHeaders = getNormalizedHeaders(event);
   const cacheHeaders = hasCredentials(normalizedHeaders) ? PRIVATE_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
