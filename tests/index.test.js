@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 
 import sharp from "sharp";
 
@@ -728,4 +728,65 @@ test("rejects non-image upstream responses", async () => {
     response.body,
     "Upstream returned a non-image response (text/html)."
   );
+});
+
+test("rejects IPv6 site-local, NAT64 and 6to4 addresses embedding private targets", () => {
+  assert.equal(isPrivateIp("fec0::1"), true);
+  assert.equal(isPrivateIp("64:ff9b::7f00:1"), true);
+  assert.equal(isPrivateIp("64:ff9b::808:808"), false);
+  assert.equal(isPrivateIp("2002:c0a8:101::1"), true);
+  assert.equal(isPrivateIp("2002:0808:0808::1"), false);
+});
+
+test("drops cookies on cross-origin redirects but keeps them same-origin", async () => {
+  usePublicDnsForTests();
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push([url, options.headers.cookie]);
+    if (url === "https://cdn.example/a.jpg") return mockRedirectResponse("/b.jpg");
+    if (url === "https://cdn.example/b.jpg") return mockRedirectResponse("https://other.example/c.jpg");
+    return mockImageResponse();
+  };
+
+  const response = await handler(
+    makeEvent({ url: "https://cdn.example/a.jpg" }, { cookie: "sid=secret" })
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(seen, [
+    ["https://cdn.example/a.jpg", "sid=secret"],
+    ["https://cdn.example/b.jpg", "sid=secret"],
+    ["https://other.example/c.jpg", undefined],
+  ]);
+});
+
+test("returns 502 for an invalid upstream redirect location", async () => {
+  usePublicDnsForTests();
+  global.fetch = async () => mockRedirectResponse("http://[bad");
+
+  const response = await handler(makeEvent({ url: "https://cdn.example/a.jpg" }));
+  assert.equal(response.statusCode, 502);
+});
+
+test("times out when the upstream body stalls after headers arrive", async (t) => {
+  usePublicDnsForTests();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  global.fetch = async (url, options) => {
+    const body = new ReadableStream({
+      start(controller) {
+        options.signal.addEventListener("abort", () =>
+          controller.error(new DOMException("aborted", "AbortError"))
+        );
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "image/png" } });
+  };
+
+  const pending = handler(makeEvent({ url: "https://cdn.example/slow.png" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(8_000);
+  const response = await pending;
+
+  assert.equal(response.statusCode, 504);
 });
