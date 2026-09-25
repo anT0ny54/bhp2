@@ -738,26 +738,45 @@ test("rejects IPv6 site-local, NAT64 and 6to4 addresses embedding private target
   assert.equal(isPrivateIp("2002:0808:0808::1"), false);
 });
 
-test("drops cookies on cross-origin redirects but keeps them same-origin", async () => {
+test("drops cookies and referer on cross-origin redirects but keeps them same-origin", async () => {
   usePublicDnsForTests();
   const seen = [];
   global.fetch = async (url, options) => {
-    seen.push([url, options.headers.cookie]);
+    seen.push([url, options.headers.cookie, options.headers.referer]);
     if (url === "https://cdn.example/a.jpg") return mockRedirectResponse("/b.jpg");
     if (url === "https://cdn.example/b.jpg") return mockRedirectResponse("https://other.example/c.jpg");
     return mockImageResponse();
   };
 
   const response = await handler(
-    makeEvent({ url: "https://cdn.example/a.jpg" }, { cookie: "sid=secret" })
+    makeEvent(
+      { url: "https://cdn.example/a.jpg" },
+      { cookie: "sid=secret", referer: "https://private.example/page?q=secret" }
+    )
   );
 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(seen, [
-    ["https://cdn.example/a.jpg", "sid=secret"],
-    ["https://cdn.example/b.jpg", "sid=secret"],
-    ["https://other.example/c.jpg", undefined],
+    ["https://cdn.example/a.jpg", "sid=secret", "https://private.example/page?q=secret"],
+    ["https://cdn.example/b.jpg", "sid=secret", "https://private.example/page?q=secret"],
+    ["https://other.example/c.jpg", undefined, undefined],
   ]);
+});
+
+test("preserves HTTPS in legacy Bandwidth Hero /bmi/ URLs", async () => {
+  usePublicDnsForTests();
+  let fetchedUrl;
+  global.fetch = async (url) => {
+    fetchedUrl = url;
+    return mockImageResponse();
+  };
+
+  const response = await handler(
+    makeEvent({ url: "http://1.1.1.1/bmi/https://cdn.example/image.jpg" })
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(fetchedUrl, "https://cdn.example/image.jpg");
 });
 
 test("returns 502 for an invalid upstream redirect location", async () => {
