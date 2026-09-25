@@ -118,7 +118,7 @@ function getImageUrl(value) {
 function normalizeImageUrl(value) {
   const raw = getImageUrl(value)
     .trim()
-    .replace(/^http:\/\/1\.1\.\d+\.\d+\/bmi\/(https?:\/\/)?/i, "http://");
+    .replace(/^http:\/\/1\.1\.\d+\.\d+\/bmi\/(https?:\/\/)?/i, (_, scheme) => scheme || "http://");
 
   // Fragments are never sent in HTTP requests. Dropping them makes equivalent
   // proxy requests share the same CDN/browser cache entry instead of creating
@@ -280,8 +280,8 @@ async function fetchImage(normalizedHeaders, initialUrl) {
           throw error;
         }
         if (next.origin !== new URL(validation.url).origin) {
-          const { cookie, ...withoutCookie } = upstreamHeaders;
-          upstreamHeaders = withoutCookie;
+          const { cookie, referer, ...withoutCredentials } = upstreamHeaders;
+          upstreamHeaders = withoutCredentials;
         }
         currentUrl = next.toString();
         continue;
@@ -346,7 +346,7 @@ async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
   // JPEG cannot. Never silently turn an animated image into a single frame.
   let pipeline = sharp(input, {
     animated: useWebp,
-    failOn: "none",
+    failOn: "warning",
     limitInputPixels: MAX_INPUT_PIXELS,
   }).rotate();
 
@@ -423,7 +423,7 @@ async function getDetectedImageContentType(buffer) {
     const sharp = await getSharp();
     const metadata = await sharp(buffer, {
       animated: true,
-      failOn: "none",
+      failOn: "warning",
       limitInputPixels: MAX_INPUT_PIXELS,
     }).metadata();
 
@@ -501,7 +501,7 @@ export async function handler(event = {}) {
       const sharp = await getSharp();
       const metadata = await sharp(source.buffer, {
         animated: true,
-        failOn: "none",
+        failOn: "warning",
         limitInputPixels: MAX_INPUT_PIXELS,
       }).metadata();
 
