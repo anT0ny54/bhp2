@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.9  
+**Version:** 2.2.10  
 **API:** 1  
 **Status:** Stable
 
@@ -47,7 +47,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.9
+X-BH-Version: 2.2.10
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -74,6 +74,8 @@ before returning it so the response never labels original bytes as WebP/JPEG.
   private address between the check and the connection.
 - Redirect destinations are re-resolved, re-checked, and re-pinned the same
   way before each hop is fetched.
+- Cookie and Referer request headers are stripped when a redirect crosses
+  origins; same-origin redirects keep them for compatibility.
 - Upstream response headers are allow-listed.
 - Cookie-bearing requests use private, no-store caching.
 
