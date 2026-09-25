@@ -18,6 +18,7 @@ The service fetches remote images, converts them to WebP or JPEG using Sharp, op
 - **Private IP blocking** (IPv4 and IPv6)
 - **DNS resolution checks** before each request
 - **DNS-rebinding protection** for security
+- **Redirect credential stripping** for cross-origin hops
 - **Image-size limits** to prevent abuse
 - **Sharp pixel limits** for memory efficiency
 - **CORS support** for cross-origin requests
@@ -29,7 +30,7 @@ The service fetches remote images, converts them to WebP or JPEG using Sharp, op
 
 ## 🚀 Requirements
 
-- **Node.js** 22.13 or later (project deployment pins Node.js 22.23.2)
+- **Node.js** 22.13 or later (project deployment pins Node.js 22.23.3)
 - **Yarn Classic** 1.22.22 (the repository's `yarn.lock` is the authoritative lockfile)
 - **Netlify CLI** for local development
 - **Sharp** for image processing
@@ -100,43 +101,38 @@ All contributions that alter request handling or add features must include tests
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname via DNS, rejects the request if any resolved address is private, and pins the outbound connection to exactly those validated addresses via an `undici` `Agent` with a custom `connect.lookup` (`createPinnedDispatcher` in `functions/index.js`). This closes the standard DNS-rebinding TOCTOU gap: Node's built-in `fetch()` ignores the legacy `http(s).Agent` option and always re-resolves the hostname itself at connect time, so a check performed beforehand doesn't otherwise constrain where the connection actually goes. Each redirect hop is re-resolved, re-checked, and re-pinned the same way. This is the one accepted exception to the Dependency Policy's "no new dependencies" preference above: there is no supported way to pin a `fetch()` connection using only Node's standard library, so `undici` — the library that already powers `fetch()` internally — is a direct dependency for this specific purpose.
 
-## 🔒 Recommended DNS Configuration
 
-For ad/tracker blocking alongside this proxy, you can point your device or
-browser at a DNS-over-HTTPS resolver running the **HaGeZi Multi Pro + TIF**
-blocklist via **My Free DNS**. The same blocklist is mirrored at three
-independent endpoints — pick whichever is fastest/most reliable from your
-network; they're interchangeable, not tiered:
+## 🌐 Free DNS Services
 
-- `https://freedns.koyeb.app/dns-query`
-- `https://dns-pi.vercel.app/api/doh/dns-query`
-- `https://dnssix.netlify.app/api/doh/dns-query`
-- `https://dns-93aca.containers.snapdeploy.app/dns-query`
+High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
-This is unrelated to the proxy's own DNS-rebinding protection (see
-[`docs/backend-contract.md`](docs/backend-contract.md#security)), which
-always applies regardless of which resolver your client uses.
+| Blocklist | DNS-over-HTTPS (DoH) |
+| :--- | :--- |
+| Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns-pi.vercel.app/api/doh/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not use in 15 minute) |
+| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not use in 15 minute) |
 
 ---
 
-## 🎯 Live Demo
+# ⚡ Bandwidth Hero Server
 
-Check out a working example of Bandwidth Hero Server in action: [bhserv.netlify.app](https://bhserv.netlify.app/)
+A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
 
----
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
 
-## 💝 Support This Project
+🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 
-If you'd like to support the development, donations are appreciated:
+## Supporting the Project
 
-**Bitcoin:** `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
-
----
+If you find this project useful, donations are appreciated:
+- **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
 
 
 ## 📋 Release history
 
-Current version: **2.2.9**. Full release notes for every version live in
+Current version: **2.2.10**. Full release notes for every version live in
 [`CHANGELOG.md`](CHANGELOG.md) — kept there only, not duplicated here, since
 maintaining the same version history in two files is exactly the kind of
 drift that caused the version-string version-string bug fixed more than once.
