@@ -1,12 +1,11 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
+import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
 
 const HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "*",
-  "x-content-type-options": "nosniff",
+  ...CORS_HEADERS,
+  ...SECURITY_HEADERS,
 };
 
 export async function handler(event = {}) {

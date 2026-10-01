@@ -9,6 +9,7 @@ import {
   createPinnedLookup,
 } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
+import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
 
 const DEFAULT_QUALITY = 40;
 const DEFAULT_MAX_WIDTH = 0;
@@ -19,12 +20,6 @@ const MAX_INPUT_PIXELS = 40_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_300_000;
-
-const CORS_HEADERS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "*",
-};
 
 // Browser cache is deliberately short-lived because extension settings are
 // encoded into the URL. Netlify's CDN keeps the expensive compressed result.
@@ -40,8 +35,7 @@ const PRIVATE_CACHE_HEADERS = {
 
 const BASE_HEADERS = {
   ...CORS_HEADERS,
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
+  ...SECURITY_HEADERS,
 };
 
 let sharpPromise;
@@ -340,15 +334,22 @@ function getSafeUpstreamHeaders(headers) {
   return output;
 }
 
-async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
+// Every decode uses the same safety options; building the instance in one
+// place keeps them from drifting apart (animated input is only ever enabled
+// for the WebP pipeline and metadata probes, never for JPEG output).
+async function createSharpPipeline(input, animated) {
   const sharp = await getSharp();
-  // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
-  // JPEG cannot. Never silently turn an animated image into a single frame.
-  let pipeline = sharp(input, {
-    animated: useWebp,
+  return sharp(input, {
+    animated,
     failOn: "warning",
     limitInputPixels: MAX_INPUT_PIXELS,
-  }).rotate();
+  });
+}
+
+async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
+  // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
+  // JPEG cannot. Never silently turn an animated image into a single frame.
+  let pipeline = (await createSharpPipeline(input, useWebp)).rotate();
 
   if (maxWidth > 0) {
     pipeline = pipeline.resize({ width: maxWidth, fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true });
@@ -386,7 +387,10 @@ async function compressImage(input, useWebp, grayscale, quality, maxWidth) {
   // protects large images from producing a base64 response that Netlify will
   // reject while preserving the extension's normal max_width behaviour.
   const requestedWidth = maxWidth > 0 ? maxWidth : 4096;
-  for (const width of [requestedWidth, 3072, 2048, 1600, 1280]) {
+  // Widths below the requested max_width are included too, otherwise a small
+  // requested limit (e.g. 800 px) would exhaust this list instantly and fail
+  // with 413 even though a narrower image could still fit the response cap.
+  for (const width of [requestedWidth, 3072, 2048, 1600, 1280, 960, 640, 320]) {
     if (width <= 0 || (maxWidth > 0 && width >= maxWidth)) continue;
     output = await encodeImage(input, useWebp, grayscale, useWebp ? 30 : 45, width);
     if (output.length <= MAX_FUNCTION_OUTPUT_BYTES) return output;
@@ -420,12 +424,7 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
 
 async function getDetectedImageContentType(buffer) {
   try {
-    const sharp = await getSharp();
-    const metadata = await sharp(buffer, {
-      animated: true,
-      failOn: "warning",
-      limitInputPixels: MAX_INPUT_PIXELS,
-    }).metadata();
+    const metadata = await (await createSharpPipeline(buffer, true)).metadata();
 
     const types = {
       jpeg: "image/jpeg",
@@ -497,13 +496,10 @@ export async function handler(event = {}) {
 
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
+    // The regex above guarantees source.contentType is a non-empty image type
+    // here, so the passthrough response always carries a real media type.
     if (!useWebp && /^image\/(gif|webp|tiff)$/i.test(source.contentType || "")) {
-      const sharp = await getSharp();
-      const metadata = await sharp(source.buffer, {
-        animated: true,
-        failOn: "warning",
-        limitInputPixels: MAX_INPUT_PIXELS,
-      }).metadata();
+      const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
 
       if ((metadata.pages || 1) > 1) {
         return createBinaryResponse(
