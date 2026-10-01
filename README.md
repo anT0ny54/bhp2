@@ -11,9 +11,9 @@ The service fetches remote images, converts them to WebP or JPEG using Sharp, op
 - **WebP output** by default (best compression)
 - **JPEG output** with `jpeg=1` parameter
 - **Grayscale conversion** with `bw=1` parameter
-- **Quality control** for fine-tuned optimization
-- **Maximum-width resizing** for responsive images
-- **Manual redirect handling** with configurable redirect limits
+- **Quality control** for fine-tuned optimization (`quality`, plus legacy `l`)
+- **Maximum-width resizing** for responsive images (`max_width`)
+- **Manual redirect handling** with a bounded redirect limit (5 hops), re-validated per hop
 - **URL validation** for HTTP and HTTPS
 - **Private IP blocking** (IPv4 and IPv6)
 - **DNS resolution checks** before each request
@@ -90,7 +90,12 @@ This project's greatest asset is its minimal size.
 
 Before opening a PR, ensure all tests pass:
 ```bash
-npm test
+npm test        # or: yarn test
+```
+
+For the full local gate (syntax validation + tests, identical to CI):
+```bash
+npm run check   # or: yarn check
 ```
 
 All contributions that alter request handling or add features must include tests matching one of these categories:
@@ -129,13 +134,3 @@ Bandwidth Hero Server fetches remote images, compresses them on the fly, and del
 If you find this project useful, donations are appreciated:
 - **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
 
-
-## 📋 Release history
-
-Current version: **2.2.10**. Full release notes for every version live in
-[`CHANGELOG.md`](CHANGELOG.md) — kept there only, not duplicated here, since
-maintaining the same version history in two files is exactly the kind of
-drift that caused the version-string version-string bug fixed more than once.
-
-For the full API contract (query parameters, response headers, caching and
-security behavior), see [`docs/backend-contract.md`](docs/backend-contract.md).

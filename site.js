@@ -4,12 +4,8 @@ const $ = (id) => document.getElementById(id);
 
 $("proxy-url").textContent = proxyUrl;
 
-const diagnostics = [
-  ["reachable", "Proxy reachable"],
-  ["cors", "CORS + handshake"],
-  ["compression", "Image compression"],
-  ["cache", "Caching headers"],
-];
+// Display labels live in index.html; only the element-id prefixes are needed here.
+const diagnostics = ["reachable", "cors", "compression", "cache"];
 
 function setStatus(id, state, detail = "") {
   const status = $(`${id}-status`);
@@ -22,7 +18,7 @@ function setStatus(id, state, detail = "") {
 }
 
 function resetStatuses() {
-  for (const [id] of diagnostics) setStatus(id, "pending", "");
+  for (const id of diagnostics) setStatus(id, "pending", "");
 }
 
 async function fetchWithTimeout(url, options = {}, timeout = 8000) {
@@ -60,7 +56,7 @@ async function runDiagnostics() {
     }
 
     if (!healthOk) {
-      for (const [id] of diagnostics.slice(1)) setStatus(id, "fail", "Diagnostics stopped");
+      for (const id of diagnostics.slice(1)) setStatus(id, "fail", "Diagnostics stopped");
       return;
     }
 
@@ -95,7 +91,7 @@ async function runDiagnostics() {
   } catch (error) {
     const detail = error?.name === "AbortError" ? "Request timed out" : "Connection or CORS error";
     setStatus("reachable", "fail", detail);
-    for (const [id] of diagnostics.slice(1)) setStatus(id, "fail", "Diagnostics stopped");
+    for (const id of diagnostics.slice(1)) setStatus(id, "fail", "Diagnostics stopped");
   } finally {
     button.disabled = false;
     button.textContent = "Run diagnostics again";
