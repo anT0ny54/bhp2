@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "sharp": "0.35.5",
-    "undici": "7.29.1"
+    "undici": "8.11.2"
   },
   "devDependencies": {
     "netlify-cli": "27.10.2"
