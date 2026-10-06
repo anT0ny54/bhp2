@@ -5,10 +5,11 @@ browser extensions (e.g. Bandwidth Guardian).
 
 The service fetches remote images, converts them to WebP or JPEG using Sharp,
 optionally applies grayscale conversion and maximum-width resizing, and
-delivers optimized versions to dramatically reduce bandwidth usage. It ships
-with a mobile-friendly diagnostics page (`index.html` + `site.js` + `site.css`)
-and a JSON health endpoint (`/api/health`).
+delivers optimized versions to dramatically reduce bandwidth usage and speed up
+page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
+`site.js` + `site.css`) and a JSON health endpoint (`/api/health`).
 
+🖥️ **Live demo:** [Bandwidth Hero](https://bhserv.netlify.app/)
 
 📋 **Changelog:** [CHANGELOG.md](CHANGELOG.md) ·
 **API contract:** [docs/backend-contract.md](docs/backend-contract.md)
@@ -18,12 +19,17 @@ and a JSON health endpoint (`/api/health`).
 ## ✨ Features (verified against the code)
 
 - **WebP output** by default (best compression)
-- **JPEG output** with `jpeg=1` parameter
-- **Grayscale conversion** with `bw=1` parameter
+- **JPEG output** with `jpeg=1` (mozjpeg, progressive)
+- **Grayscale conversion** with `bw=1`
 - **Quality control**: `quality` (1–100, default 60) plus legacy alias `l`
-- **Maximum-width resizing** (`max_width`, 0 = no limit, capped at 8192)
-- **Animated-image passthrough**: multi-frame GIF/WebP/TIFF sources are
-  returned untouched when JPEG output is requested
+- **Maximum-width resizing** (`max_width`, 0 = no limit, capped at 8192; never
+  enlarges)
+- **EXIF auto-orientation**; metadata is stripped from re-encoded output
+- **Animated-image passthrough**: when JPEG output is requested, multi-frame
+  GIF/WebP/TIFF sources are returned untouched (detected from the bytes even
+  if the upstream omitted `Content-Type`). If those bytes exceed the 4.3 MB
+  response target the request fails with a clear `413` instead of an opaque
+  gateway error. WebP output keeps animation.
 - **Never-enlarge guarantee**: original bytes are returned (with format
   detection when the upstream omitted `Content-Type`) if compression would
   grow the file
@@ -31,23 +37,27 @@ and a JSON health endpoint (`/api/health`).
   to stay under Netlify's 6 MB buffered response limit (4.3 MB binary safety
   target)
 - **Manual redirect handling**: bounded at 5 hops; every hop is re-resolved,
-  re-validated and re-pinned; credentials stripped on cross-origin hops
+  re-validated and re-pinned; `Cookie`/`Referer` are stripped on cross-origin
+  hops
 - **SSRF protection**: HTTP/HTTPS-only URLs; private/loopback/link-local/
-  CGNAT/multicast/reserved IPv4 **and** IPv6 blocking; DNS validated before
-  each request and the socket pinned to the validated addresses via the
-  native `lookup` option of `node:http`/`node:https` (DNS-rebinding/TOCTOU
-  protection)
+  CGNAT/multicast/reserved IPv4 **and** IPv6 blocking (including IPv6
+  addresses that embed an IPv4 address: IPv4-compatible, IPv4-mapped, NAT64
+  and 6to4); DNS validated before each request and the socket pinned to the
+  validated addresses via the native `lookup` option of `node:http`/
+  `node:https` (DNS-rebinding/TOCTOU protection). Public IPv6 literal URLs
+  are supported.
 - **Diagnosable failures**: connector errors return
-  `502 Upstream connection failed [<code>].` instead of an opaque 500, and the
-  diagnostics page shows the server's error message
+  `502 Upstream connection failed [<code>].` instead of an opaque 500, an
+  upstream that stalls past the deadline returns `504`, and the diagnostics
+  page shows the server's error message
 - **Upstream limits**: 8 s total fetch timeout (one deadline for all hops and
   the body download), 15 MB input, 40 MP input pixels
 - **Allow-listed upstream response headers** (`etag`, `last-modified`,
-  `expires`)
+  `expires`), forwarded only when the original bytes are returned unchanged
 - **CORS support** for cross-origin requests
 - **Caching**: 24 h browser / 30 day Netlify CDN for public responses;
-  `private, no-store` for cookie-bearing requests; `Netlify-Vary` pins the
-  cache key to the extension query params
+  `private, no-store` for cookie-bearing requests and for every error;
+  `Netlify-Vary` pins the cache key to the extension query params
 - **Telemetry headers**: `x-bh-*` plus legacy `x-original-size`,
   `x-compressed-size`, `x-bytes-saved`
 - **Handshake response** (`bandwidth-hero-proxy`) for requests without a `url`
@@ -65,38 +75,57 @@ GET /api/index?url=<encoded-image-url>[&quality=60|l=60][&bw=1][&jpeg=1][&max_wi
 GET /api/health
 ```
 
-Full contract: [`docs/backend-contract.md`](docs/backend-contract.md).
+Full contract (status codes, limits, headers):
+[`docs/backend-contract.md`](docs/backend-contract.md).
 
 ---
 
 ## 🚀 Requirements
 
 - **Node.js** ≥ 22.13.0 (`engines` in `package.json`); the Netlify deployment
-  pins Node.js **22.23.3** (`netlify.toml`)
+  and the lockfile workflow pin Node.js **22.23.3** (`netlify.toml`,
+  `.github/workflows/`)
 - **Yarn Classic** 1.22.22 (`packageManager`; the repository's `yarn.lock` is
   the authoritative lockfile)
-- **Dependencies** (exact-pinned): `sharp` 0.35.5 only — upstream fetching
-  uses Node's standard-library `node:http`/`node:https`
-- **Netlify CLI** for local development (`yarn dev` / `yarn start`)
+- **Runtime dependency** (exact-pinned): `sharp` 0.35.5, plus its native
+  Linux x64/arm64 `@img` packages as `optionalDependencies` (these must stay
+  enabled during installation). Upstream fetching uses Node's standard-library
+  `node:http`/`node:https`, so there is no HTTP-client dependency.
+- **Dev dependency**: `netlify-cli` for local development (`yarn dev` /
+  `yarn start`)
+
+> [!NOTE]
+> When bumping `sharp`, bump the four `@img/sharp-*` pins in
+> `optionalDependencies` to the versions that `sharp` itself declares, or the
+> installed native binary will not match the JavaScript wrapper.
 
 ## 🧪 Testing
 
 ```bash
-yarn install     # regenerate yarn.lock after the undici removal
-yarn test        # node --test tests/index.test.js tests/health.test.js
-yarn check       # full local gate (syntax validation + tests), identical to CI
+yarn install       # installs dependencies; keeps yarn.lock in sync
+yarn test          # node --test tests/index.test.js tests/health.test.js
+yarn run check     # full local gate (syntax validation + tests), same as CI
 ```
 
-Coverage of the current suites (all network-free):
+> [!IMPORTANT]
+> Use `yarn run check`, not `yarn check`. `check` is a built-in Yarn Classic
+> command (lockfile integrity check) and takes precedence over the script.
+
+Coverage of the current suites (19 tests, all network-free):
 
 - **Compatibility tests**: the `bandwidth-hero-proxy` handshake, CORS
   preflight, and 405 handling.
 - **Security tests**: host validation blocks (SSRF) — loopback, RFC1918,
-  link-local, CGNAT, IETF-reserved (192.0.0.0/24) and IPv6 private ranges;
-  URL parser acceptance/rejection; DNS pin lookup behavior.
-- **Consistency tests**: `package.json`, `util/version.js` and `/api/health`
-  report the same version; shared CORS/security headers are present on health
-  responses.
+  link-local, CGNAT, IETF-reserved (192.0.0.0/24) and IPv6 private ranges
+  including embedded-IPv4 forms; URL parser acceptance/rejection; DNS pin
+  lookup behavior; DNS resolution validation (private answers rejected, DNS
+  failure → 502, IPv6 literal hostnames).
+- **Consistency tests**: `package.json`, `util/version.js`, `/api/health` and
+  `docs/backend-contract.md` report the same version; shared CORS/security
+  headers are present on health responses.
+
+The upstream fetch path itself (redirects, pinning, limits) is not covered by
+the offline suites because the SSRF filter correctly refuses local servers.
 
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname
@@ -173,7 +202,8 @@ This project's greatest asset is its minimal size.
   - Overall deployment processes.
 
 Every release must update `package.json`, `util/version.js`,
-`docs/backend-contract.md`, and `CHANGELOG.md` together.
+`docs/backend-contract.md`, and `CHANGELOG.md` together. The test suite fails
+if the first three disagree on the version.
 
 ---
 

@@ -77,7 +77,10 @@ async function runDiagnostics() {
     // GitHub's public avatar is intentionally fetched by the proxy, not by this page.
     const sample = "https://avatars.githubusercontent.com/u/9919";
     const started = performance.now();
-    const image = await fetchWithTimeout(`${proxyPath}?url=${encodeURIComponent(sample)}`);
+    // The server's own upstream deadline is 8 s, so give this request more
+    // headroom than that; otherwise the page aborts first and can never show
+    // the server's 504 message.
+    const image = await fetchWithTimeout(`${proxyPath}?url=${encodeURIComponent(sample)}`, {}, 15000);
     const elapsed = Math.round(performance.now() - started);
     const type = image.headers.get("content-type") || "";
     const original = Number(image.headers.get("x-bh-original-size") || 0);
