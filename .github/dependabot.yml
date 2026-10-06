@@ -1,0 +1,16 @@
+version: 2
+
+updates:
+  # package.json and yarn.lock are in the repository root
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  # Keep GitHub Actions up to date
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      
