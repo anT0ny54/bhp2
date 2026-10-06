@@ -220,13 +220,17 @@ function requestPinned(urlString, upstreamHeaders, lookup, signal) {
   });
 }
 
+function createHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
 async function readLimitedBody(response) {
   const contentLength = Number.parseInt(response.headers["content-length"] || "", 10);
   if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
     response.destroy();
-    const error = new Error("The source image is too large.");
-    error.statusCode = 413;
-    throw error;
+    throw createHttpError(413, "The source image is too large.");
   }
 
   const chunks = [];
@@ -235,9 +239,7 @@ async function readLimitedBody(response) {
     total += chunk.length;
     if (total > MAX_IMAGE_BYTES) {
       response.destroy();
-      const error = new Error("The source image is too large.");
-      error.statusCode = 413;
-      throw error;
+      throw createHttpError(413, "The source image is too large.");
     }
     chunks.push(chunk);
   }
@@ -324,10 +326,12 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       };
     }
   } catch (error) {
-    if (error?.name === "AbortError") {
-      const timeout = new Error("Upstream image request timed out.");
-      timeout.statusCode = 504;
-      throw timeout;
+    // When the shared deadline fires mid-body, Node surfaces the destroyed
+    // socket as a plain ECONNRESET ("aborted") rather than an AbortError, so
+    // the controller's own state is the reliable signal for a timeout.
+    if (error?.name === "AbortError" ||
+        (controller.signal.aborted && !Number.isInteger(error?.statusCode))) {
+      throw createHttpError(504, "Upstream image request timed out.");
     }
     // Connector-level failures (ECONNREFUSED, ENETUNREACH, TLS errors, DNS
     // rebinding caught late) mean the upstream could not be reached at all.
@@ -451,6 +455,25 @@ async function getDetectedImageContentType(buffer) {
   }
 }
 
+// Returns the upstream bytes untouched. Both the animated-JPEG passthrough and
+// the never-enlarge fallback use this. Because the response is base64 encoded,
+// untouched bytes above the safety target would exceed Netlify's 6 MB buffered
+// limit and fail as an opaque gateway error, so report a clear 413 instead.
+function createOriginalResponse(source, contentType, cacheHeaders) {
+  const size = source.buffer.length;
+  if (size > MAX_FUNCTION_OUTPUT_BYTES) {
+    throw createHttpError(413, "The source image is too large to return unmodified.");
+  }
+  return createBinaryResponse(
+    source.buffer,
+    {
+      ...getSafeUpstreamHeaders(source.headers),
+      ...getOutputHeaders(contentType, size, size),
+    },
+    cacheHeaders,
+  );
+}
+
 export async function handler(event = {}) {
   const method = event.httpMethod || "GET";
 
@@ -503,18 +526,19 @@ export async function handler(event = {}) {
 
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
-    if (!useWebp && /^image\/(gif|webp|tiff)$/i.test(source.contentType || "")) {
-      const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
-
-      if ((metadata.pages || 1) > 1) {
-        return createBinaryResponse(
-          source.buffer,
-          {
-            ...getSafeUpstreamHeaders(source.headers),
-            ...getOutputHeaders(source.contentType, originalSize, originalSize),
-          },
-          cacheHeaders,
-        );
+    // A missing Content-Type is probed too, so an animated GIF from a CDN
+    // that omits the header is not silently flattened to its first frame.
+    if (!useWebp && (!source.contentType || /^image\/(gif|webp|tiff)$/i.test(source.contentType))) {
+      try {
+        const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
+        if ((metadata.pages || 1) > 1) {
+          const type = source.contentType || DETECTED_IMAGE_TYPES[metadata.format] || "application/octet-stream";
+          return createOriginalResponse(source, type, cacheHeaders);
+        }
+      } catch (error) {
+        // An undecodable body with a declared image type is reported by the
+        // compression step below; only a 503/413-style HTTP error is final here.
+        if (Number.isInteger(error?.statusCode)) throw error;
       }
     }
 
@@ -532,15 +556,7 @@ export async function handler(event = {}) {
       // detect the format only on this uncommon fallback path.
       const originalContentType =
         source.contentType || await getDetectedImageContentType(source.buffer);
-
-      return createBinaryResponse(
-        source.buffer,
-        {
-          ...getSafeUpstreamHeaders(source.headers),
-          ...getOutputHeaders(originalContentType, originalSize, originalSize),
-        },
-        cacheHeaders,
-      );
+      return createOriginalResponse(source, originalContentType, cacheHeaders);
     }
 
     const outputType = useWebp ? "image/webp" : "image/jpeg";
