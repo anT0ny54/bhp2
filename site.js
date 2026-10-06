@@ -91,8 +91,17 @@ async function runDiagnostics() {
     setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Browser/CDN cache headers verified" : "Public Cache-Control header missing");
   } catch (error) {
     const detail = error?.name === "AbortError" ? "Request timed out" : "Connection or CORS error";
-    setStatus("reachable", "fail", detail);
-    for (const id of remainingDiagnostics) setStatus(id, "fail", "Diagnostics stopped");
+    // Only mark reachability failed if it hasn't already passed; a timeout in
+    // a later stage (compression/cache fetch) must not rewrite an earlier
+    // passing result.
+    if (!$("reachable-status").classList.contains("ok")) {
+      setStatus("reachable", "fail", detail);
+    }
+    for (const id of remainingDiagnostics) {
+      if (!$(`${id}-status`).classList.contains("ok")) {
+        setStatus(id, "fail", "Diagnostics stopped");
+      }
+    }
   } finally {
     button.disabled = false;
     button.textContent = "Run diagnostics again";
