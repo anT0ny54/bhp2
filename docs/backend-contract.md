@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.12  
+**Version:** 2.2.13  
 **API:** 1  
 **Status:** Stable
 
@@ -47,7 +47,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.12
+X-BH-Version: 2.2.13
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -63,15 +63,23 @@ are returned instead and compressed/original size are equal. If the upstream
 omitted `Content-Type`, the fallback path detects the original image format
 before returning it so the response never labels original bytes as WebP/JPEG.
 
+## Error responses
+
+Errors are plain text with an appropriate status code, always carrying
+`Cache-Control: private, no-store`. Connector-level failures (the upstream
+could not be reached at all) return
+`502 Upstream connection failed [<code>].` with the underlying error code, so
+a broken deployment is diagnosable from the response body.
+
 ## Security
 
 - Only HTTP and HTTPS URLs are accepted.
 - Localhost, loopback, RFC1918, link-local, CGNAT, multicast and other private
   address ranges are rejected.
 - DNS answers are resolved and checked before every upstream request, and the
-  outbound connection is pinned to exactly those validated addresses (an
-  `undici` dispatcher with a custom resolver), so a hostname can't rebind to a
-  private address between the check and the connection.
+  outbound connection is pinned to exactly those validated addresses via the
+  `lookup` option of Node's native `http`/`https.request`, so a hostname can't
+  rebind to a private address between the check and the connection.
 - Redirect destinations are re-resolved, re-checked, and re-pinned the same
   way before each hop is fetched.
 - Cookie and Referer request headers are stripped when a redirect crosses
@@ -95,7 +103,8 @@ Cookie-bearing requests use `private, no-store`.
 
 The project uses esbuild bundling and explicitly externalizes Sharp while
 including its native `@img` packages. Sharp optional dependencies must remain
-enabled during installation.
+enabled during installation. Upstream fetches use only Node standard-library
+modules (`node:http` / `node:https`).
 
 Netlify's buffered synchronous function responses are limited to 6 MB. Because
 binary Lambda-style responses are base64 encoded (~30% overhead), this build
