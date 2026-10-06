@@ -11,7 +11,20 @@ import {
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
 import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
 
-const DEFAULT_QUALITY = 40;
+const DETECTED_IMAGE_TYPES = Object.freeze({
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  tiff: "image/tiff",
+  avif: "image/avif",
+  heif: "image/heif",
+  heic: "image/heic",
+  jxl: "image/jxl",
+});
+
+const DEFAULT_QUALITY = 60;
 const DEFAULT_MAX_WIDTH = 0;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_REDIRECTS = 5;
@@ -309,9 +322,6 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       };
     }
 
-    const error = new Error("Unable to fetch image.");
-    error.statusCode = 502;
-    throw error;
   } catch (error) {
     if (error?.name === "AbortError") {
       const timeout = new Error("Upstream image request timed out.");
@@ -425,20 +435,7 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
 async function getDetectedImageContentType(buffer) {
   try {
     const metadata = await (await createSharpPipeline(buffer, true)).metadata();
-
-    const types = {
-      jpeg: "image/jpeg",
-      jpg: "image/jpeg",
-      png: "image/png",
-      webp: "image/webp",
-      gif: "image/gif",
-      tiff: "image/tiff",
-      avif: "image/avif",
-      heif: "image/heif",
-      heic: "image/heic",
-      jxl: "image/jxl",
-    };
-    return types[metadata.format] || "application/octet-stream";
+    return DETECTED_IMAGE_TYPES[metadata.format] || "application/octet-stream";
   } catch {
     return "application/octet-stream";
   }
