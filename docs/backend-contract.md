@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.11  
+**Version:** 2.2.12  
 **API:** 1  
 **Status:** Stable
 
@@ -16,8 +16,8 @@ WebP/JPEG image. `GET /api/health` provides a lightweight compatibility check.
 | Parameter | Default | Description |
 |---|---:|---|
 | `url` | — | Full HTTP/HTTPS upstream image URL |
-| `quality` | `40` | Compression quality, 1–100 |
-| `l` | `40` | Legacy alias for `quality` |
+| `quality` | `60` | Compression quality, 1–100 |
+| `l` | `60` | Legacy alias for `quality` |
 | `bw` | `0` | `1` enables grayscale |
 | `jpeg` | `0` | `1` requests JPEG; otherwise WebP |
 | `max_width` | `0` | Resize limit in pixels; 0 means no requested limit |
