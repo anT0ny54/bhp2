@@ -9,7 +9,6 @@ delivers optimized versions to dramatically reduce bandwidth usage. It ships
 with a mobile-friendly diagnostics page (`index.html` + `site.js` + `site.css`)
 and a JSON health endpoint (`/api/health`).
 
-🖮️ **Live Demo:** [Bandwidth Hero](https://bhp2.netlify.app/)
 
 📋 **Changelog:** [CHANGELOG.md](CHANGELOG.md) ·
 **API contract:** [docs/backend-contract.md](docs/backend-contract.md)
