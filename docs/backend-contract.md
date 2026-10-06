@@ -47,7 +47,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.11
+X-BH-Version: 2.2.12
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
