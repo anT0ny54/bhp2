@@ -28,6 +28,13 @@ test("health version matches package.json and util/version.js", () => {
   assert.equal(pkg.version, PROXY_VERSION, "package.json drifted from util/version.js");
 });
 
+test("backend contract documents the running version", () => {
+  const contract = readFileSync(new URL("../docs/backend-contract.md", import.meta.url), "utf8");
+  assert.ok(contract.includes(`**Version:** ${PROXY_VERSION}`), "contract header version drifted");
+  assert.ok(contract.includes(`X-BH-Version: ${PROXY_VERSION}`), "contract example version drifted");
+  assert.ok(contract.includes(`X-BH-Features: ${FEATURES.join(",")}`), "contract features drifted");
+});
+
 test("health responses carry the shared CORS and security headers", async () => {
   const res = await handler({ ...BASE_EVENT });
   for (const [name, value] of Object.entries(CORS_HEADERS)) {

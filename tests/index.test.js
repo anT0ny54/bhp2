@@ -12,6 +12,10 @@ import {
   isPrivateIp,
   isPrivateHost,
   createPinnedLookup,
+  resolveAndValidateRemoteUrl,
+  setDnsLookupForTests,
+  resetDnsLookupForTests,
+  DNS_RESOLUTION_ERROR,
 } from "../util/validate.js";
 
 const BASE_EVENT = {
@@ -92,6 +96,9 @@ test("isPrivateIp blocks loopback, RFC1918, link-local, CGNAT, multicast and res
     "192.168.0.1", "169.254.1.1", "100.64.0.0", "100.127.255.255",
     "198.18.0.1", "198.19.255.255", "192.0.0.9", "224.0.0.1", "255.255.255.255",
     "::1", "::", "fd12:3456::1", "fe80::1", "ff02::1",
+    // IPv4-compatible / mapped / NAT64 / 6to4 forms judged by embedded IPv4.
+    "::127.0.0.1", "::a9fe:a9fe", "::10.0.0.1", "::ffff:127.0.0.1",
+    "64:ff9b::7f00:1", "2002:7f00:1::1",
   ]) {
     assert.equal(isPrivateIp(ip), true, ip);
   }
@@ -131,4 +138,47 @@ test("createPinnedLookup returns the validated records and honors family selecti
     assert.equal(address, records[0].address);
     assert.equal(family, 4);
   });
+});
+
+test("resolveAndValidateRemoteUrl strips IPv6 brackets before the DNS lookup", async () => {
+  let seen;
+  setDnsLookupForTests(async (hostname) => {
+    seen = hostname;
+    return [{ address: "2606:4700:4700::1111", family: 6 }];
+  });
+  try {
+    const result = await resolveAndValidateRemoteUrl("http://[2606:4700:4700::1111]/x.png");
+    assert.equal(result.valid, true);
+    assert.equal(seen, "2606:4700:4700::1111");
+    assert.deepEqual(result.addresses, [{ address: "2606:4700:4700::1111", family: 6 }]);
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+test("resolveAndValidateRemoteUrl rejects hostnames that resolve to private addresses", async () => {
+  setDnsLookupForTests(async () => [
+    { address: "93.184.216.34", family: 4 },
+    { address: "10.0.0.7", family: 4 }, // one bad record poisons the answer
+  ]);
+  try {
+    const result = await resolveAndValidateRemoteUrl("http://rebind.example.com/x.png");
+    assert.equal(result.valid, false);
+    assert.equal(result.error, PRIVATE_HOST_ERROR);
+    assert.equal(result.statusCode, 403);
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+test("resolveAndValidateRemoteUrl reports DNS failures as 502", async () => {
+  setDnsLookupForTests(async () => { throw new Error("ENOTFOUND"); });
+  try {
+    const result = await resolveAndValidateRemoteUrl("http://nx.example.com/x.png");
+    assert.equal(result.valid, false);
+    assert.equal(result.error, DNS_RESOLUTION_ERROR);
+    assert.equal(result.statusCode, 502);
+  } finally {
+    resetDnsLookupForTests();
+  }
 });
