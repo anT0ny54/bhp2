@@ -1,4 +1,5 @@
-import { Agent } from "undici";
+import http from "node:http";
+import https from "node:https";
 
 import {
   INVALID_URL_ERROR,
@@ -179,63 +180,66 @@ function hasCredentials(normalized) {
   return Boolean(normalized.cookie);
 }
 
-// Node's global fetch() (undici under the hood) re-resolves DNS itself at
-// connect time and ignores the legacy http(s).Agent option entirely, so a
-// DNS check performed beforehand doesn't actually constrain where fetch()
-// connects. Building an undici Agent with a custom connect.lookup and
-// passing it as fetch()'s `dispatcher` is the supported way to pin the
-// socket to addresses that have already been validated.
-function createPinnedDispatcher(addresses) {
-  return new Agent({
-    connect: { lookup: createPinnedLookup(addresses) },
-    // Each dispatcher is scoped to a single validated hop; there's nothing
-    // to gain from keeping its socket warm afterward.
-    keepAliveTimeout: 1_000,
-    keepAliveMaxTimeout: 1_000,
+// Node's native http/https request supports a custom `lookup` in its options
+// object, so the socket can be pinned to the DNS-validated addresses directly
+// through a first-class, documented API — no third-party dispatcher involved.
+// This replaces the previous undici Agent approach, which failed in
+// production with opaque undici "fetch failed" connector errors on some
+// Netlify runtimes (npm-undici vs. Node's built-in fetch interop under
+// esbuild bundling). The DNS pinning guarantees are identical: the pinned
+// lookup only ever answers with the addresses that
+// resolveAndValidateRemoteUrl already checked.
+function requestPinned(urlString, upstreamHeaders, lookup, signal) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(urlString);
+    const transport = target.protocol === "https:" ? https : http;
+    const request = transport.get(target, {
+      lookup,
+      headers: upstreamHeaders,
+      // Fresh socket per hop; nothing pooled, nothing to leak or keep warm.
+      agent: false,
+    }, (response) => {
+      resolve(response);
+    });
+
+    request.on("error", reject);
+
+    // Socket inactivity timeout; resets on activity, so a slow-drip upstream
+    // cannot stall forever even between bytes.
+    request.setTimeout(FETCH_TIMEOUT_MS, () => {
+      request.destroy(Object.assign(
+        new Error("Upstream socket timed out."),
+        { name: "AbortError" },
+      ));
+    });
+
+    // One deadline covers every hop AND the body download.
+    const onAbort = () => request.destroy(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-async function discardBody(response) {
-  // Free the pinned socket for responses we won't read (redirects, errors).
-  try { await response.body?.cancel(); } catch { /* already closed */ }
-}
-
 async function readLimitedBody(response) {
-  const contentLength = Number.parseInt(response.headers.get("content-length") || "", 10);
+  const contentLength = Number.parseInt(response.headers["content-length"] || "", 10);
   if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
+    response.destroy();
     const error = new Error("The source image is too large.");
     error.statusCode = 413;
     throw error;
   }
 
-  if (!response.body) {
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > MAX_IMAGE_BYTES) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of response) {
+    total += chunk.length;
+    if (total > MAX_IMAGE_BYTES) {
+      response.destroy();
       const error = new Error("The source image is too large.");
       error.statusCode = 413;
       throw error;
     }
-    return buffer;
-  }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_IMAGE_BYTES) {
-        await reader.cancel();
-        const error = new Error("The source image is too large.");
-        error.statusCode = 413;
-        throw error;
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    reader.releaseLock();
+    chunks.push(chunk);
   }
   return Buffer.concat(chunks, total);
 }
@@ -245,10 +249,9 @@ async function fetchImage(normalizedHeaders, initialUrl) {
   // Forwarded request headers don't change across hops, except that
   // credentials are dropped when a redirect leaves the original origin.
   let upstreamHeaders = buildUpstreamHeaders(normalizedHeaders);
-  const dispatchers = [];
+  const controller = new AbortController();
   // One deadline covers every hop AND the body download, so a slow-drip
   // upstream can't outlive the timeout once its headers have arrived.
-  const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
@@ -260,19 +263,18 @@ async function fetchImage(normalizedHeaders, initialUrl) {
         throw error;
       }
 
-      const dispatcher = createPinnedDispatcher(validation.addresses);
-      dispatchers.push(dispatcher);
-      const upstream = await fetch(validation.url, {
-        method: "GET",
-        headers: upstreamHeaders,
-        dispatcher,
-        redirect: "manual",
-        signal: controller.signal,
-      });
+      const upstream = await requestPinned(
+        validation.url,
+        upstreamHeaders,
+        createPinnedLookup(validation.addresses),
+        controller.signal,
+      );
 
-      const location = upstream.headers.get("location");
-      if (upstream.status >= 300 && upstream.status < 400 && location) {
-        await discardBody(upstream);
+      const location = upstream.headers.location;
+      const status = upstream.statusCode || 0;
+      if (status >= 300 && status < 400 && location) {
+        // agent:false, so destroying the response closes the socket.
+        upstream.destroy();
         if (redirect === MAX_REDIRECTS) {
           const error = new Error("Too many upstream redirects.");
           error.statusCode = 508;
@@ -294,14 +296,14 @@ async function fetchImage(normalizedHeaders, initialUrl) {
         continue;
       }
 
-      if (!upstream.ok) {
-        await discardBody(upstream);
-        const error = new Error(`Upstream image request failed with status ${upstream.status}.`);
-        error.statusCode = upstream.status >= 400 ? upstream.status : 502;
+      if (status < 200 || status >= 300) {
+        upstream.destroy();
+        const error = new Error(`Upstream image request failed with status ${status}.`);
+        error.statusCode = status >= 400 && status <= 599 ? status : 502;
         throw error;
       }
 
-      const contentType = (upstream.headers.get("content-type") || "")
+      const contentType = String(upstream.headers["content-type"] || "")
         .split(";", 1)[0]
         .trim()
         .toLowerCase();
@@ -309,7 +311,7 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       // Keep compatibility with CDNs that omit Content-Type. Sharp will validate
       // the actual bytes below. Explicit non-image responses are rejected early.
       if (contentType && !contentType.startsWith("image/")) {
-        await discardBody(upstream);
+        upstream.destroy();
         const error = new Error(`Upstream returned a non-image response (${contentType}).`);
         error.statusCode = 415;
         throw error;
@@ -321,24 +323,33 @@ async function fetchImage(normalizedHeaders, initialUrl) {
         headers: upstream.headers,
       };
     }
-
   } catch (error) {
     if (error?.name === "AbortError") {
       const timeout = new Error("Upstream image request timed out.");
       timeout.statusCode = 504;
       throw timeout;
     }
+    // Connector-level failures (ECONNREFUSED, ENETUNREACH, TLS errors, DNS
+    // rebinding caught late) mean the upstream could not be reached at all.
+    // Report them as gateway errors with the underlying code so a broken
+    // deployment is diagnosable from the response body and the logs.
+    if (error && !Number.isInteger(error.statusCode)) {
+      const code = error.code ? ` [${error.code}]` : "";
+      const gateway = new Error(`Upstream connection failed${code}.`);
+      gateway.statusCode = 502;
+      gateway.cause = error;
+      throw gateway;
+    }
     throw error;
   } finally {
     clearTimeout(timer);
-    for (const dispatcher of dispatchers) dispatcher.destroy().catch(() => {});
   }
 }
 
 function getSafeUpstreamHeaders(headers) {
   const output = {};
   for (const name of ["etag", "last-modified", "expires"]) {
-    const value = headers.get(name);
+    const value = headers[name];
     if (value) output[name] = value;
   }
   return output;
@@ -431,7 +442,6 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
   };
 }
 
-
 async function getDetectedImageContentType(buffer) {
   try {
     const metadata = await (await createSharpPipeline(buffer, true)).metadata();
@@ -493,8 +503,6 @@ export async function handler(event = {}) {
 
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
-    // The regex above guarantees source.contentType is a non-empty image type
-    // here, so the passthrough response always carries a real media type.
     if (!useWebp && /^image\/(gif|webp|tiff)$/i.test(source.contentType || "")) {
       const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
 
@@ -542,7 +550,7 @@ export async function handler(event = {}) {
       cacheHeaders,
     );
   } catch (error) {
-    console.error("Image proxy error:", error);
+    console.error("Image proxy error:", error?.message || error, error?.cause || "");
     const statusCode = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599
       ? error.statusCode
       : error?.name === "AbortError" ? 504 : 500;
@@ -553,4 +561,3 @@ export async function handler(event = {}) {
     });
   }
 }
-
