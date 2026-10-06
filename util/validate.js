@@ -29,6 +29,10 @@ function isPrivateIpv4(value) {
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
+    // 192.0.0.0/24 is IETF protocol-assignments/reserved and not a
+    // legitimate public image host, so treat it like the other reserved
+    // ranges above instead of letting it through the SSRF filter.
+    (a === 192 && b === 0) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) || a >= 224;
 }
