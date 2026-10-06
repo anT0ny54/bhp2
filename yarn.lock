@@ -6347,9 +6347,9 @@ slice-ansi@^9.0.0:
     is-fullwidth-code-point "^5.1.0"
 
 smol-toml@^1.5.2:
-  version "1.8.0"
-  resolved "https://registry.yarnpkg.com/smol-toml/-/smol-toml-1.8.0.tgz#dc5e0936825f1fef37bdf2c569081f709d8a009f"
-  integrity sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==
+  version "1.9.0"
+  resolved "https://registry.yarnpkg.com/smol-toml/-/smol-toml-1.9.0.tgz#f36b8dc7eb621c541c48f9fba6925dab95172817"
+  integrity sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ==
 
 sonic-boom@^4.0.1:
   version "4.2.1"
