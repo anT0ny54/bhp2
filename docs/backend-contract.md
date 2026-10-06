@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.13  
+**Version:** 2.2.14  
 **API:** 1  
 **Status:** Stable
 
@@ -23,6 +23,22 @@ WebP/JPEG image. `GET /api/health` provides a lightweight compatibility check.
 | `max_width` | `0` | Resize limit in pixels; 0 means no requested limit |
 
 No existing parameter was removed or renamed.
+
+A request without `url` is the legacy handshake: `200` with the plain-text body
+`bandwidth-hero-proxy` and `Cache-Control: public, max-age=300`.
+
+Non-numeric `quality`/`max_width` values fall back to their defaults; numeric
+values are clamped (`quality` 1–100, `max_width` 0–8192).
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Upstream fetch deadline (all redirect hops + body download) | 8 s |
+| Redirects followed | 5 |
+| Source image size | 15 MB |
+| Source image pixels | 40 MP |
+| Response size target (before base64) | 4.3 MB |
 
 ## Compatibility
 
@@ -47,7 +63,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.13
+X-BH-Version: 2.2.14
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -57,6 +73,12 @@ X-Original-Size: <bytes>
 X-Compressed-Size: <bytes>
 X-Bytes-Saved: <bytes>
 ```
+
+When `jpeg=1` is requested and the source is a multi-frame GIF/WebP/TIFF
+(detected from the bytes even if the upstream omitted `Content-Type`), the
+original animated bytes are returned unmodified, because JPEG cannot carry
+animation. If those bytes exceed the 4.3 MB response target, the request fails
+with `413` rather than producing a response Netlify would reject.
 
 If compression would make the representation larger, the original image bytes
 are returned instead and compressed/original size are equal. If the upstream
@@ -71,6 +93,24 @@ could not be reached at all) return
 `502 Upstream connection failed [<code>].` with the underlying error code, so
 a broken deployment is diagnosable from the response body.
 
+### Status codes
+
+| Status | Meaning |
+|---:|---|
+| 200 | Image, or the handshake when `url` is absent |
+| 204 | CORS preflight (`OPTIONS`) |
+| 400 | `url` is not a valid HTTP/HTTPS URL, or is a literal private/local host |
+| 403 | Hostname resolved to a private address, or a redirect led to a private address |
+| 405 | Method other than `GET`/`OPTIONS` (`Allow: GET, OPTIONS`) |
+| 413 | Source above 15 MB, optimized output cannot fit the response target, or original bytes above the target would have to be returned unmodified |
+| 415 | Upstream explicitly returned a non-image `Content-Type` |
+| 4xx/5xx | Upstream error statuses are passed through |
+| 500 | Other processing failure (for example, undecodable image data) |
+| 502 | DNS failure, upstream connection failure `[<code>]`, or invalid redirect |
+| 503 | Sharp is unavailable on the runtime |
+| 504 | Upstream deadline exceeded (including a stalled body download) |
+| 508 | More than 5 redirects |
+
 ## Security
 
 - Only HTTP and HTTPS URLs are accepted.
@@ -84,7 +124,11 @@ a broken deployment is diagnosable from the response body.
   way before each hop is fetched.
 - Cookie and Referer request headers are stripped when a redirect crosses
   origins; same-origin redirects keep them for compatibility.
-- Upstream response headers are allow-listed.
+- IPv6 addresses that embed an IPv4 address (IPv4-compatible `::a.b.c.d`,
+  IPv4-mapped, NAT64 and 6to4) are judged by the embedded IPv4 address.
+- Upstream response headers are allow-listed (`etag`, `last-modified`,
+  `expires`) and are forwarded only when the original bytes are returned; a
+  re-encoded image is a new representation and gets none of them.
 - Cookie-bearing requests use private, no-store caching.
 
 ## Caching
