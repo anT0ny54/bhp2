@@ -59,22 +59,24 @@ function isPrivateIpv6(value) {
   const normalized = value.toLowerCase();
   const groups = expandIpv6(normalized);
   if (!groups || groups.length !== 8) return true;
-  const allZero = groups.every((x) => x === 0);
-  const loopback = groups.slice(0, 7).every((x) => x === 0) && groups[7] === 1;
   const first16 = groups[0];
   // fe80::/10 link-local plus the deprecated fec0::/10 site-local range.
   const linkLocal = first16 >= 0xfe80 && first16 <= 0xfeff;
   const uniqueLocal = first16 >= 0xfc00 && first16 <= 0xfdff;
   const multicast = first16 >= 0xff00 && first16 <= 0xffff;
   const toIpv4 = (high, low) => [high >>> 8, high & 255, low >>> 8, low & 255].join(".");
+  // ::/96 (IPv4-compatible, plus "::" and "::1") and ::ffff:0:0/96
+  // (IPv4-mapped) both embed an IPv4 address; judge them by that address so
+  // forms like ::a9fe:a9fe (169.254.169.254) cannot slip past the filter.
+  const compatible = groups.slice(0, 6).every((x) => x === 0);
   const mapped = groups.slice(0, 5).every((x) => x === 0) && groups[5] === 0xffff;
-  if (mapped) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+  if (compatible || mapped) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
   // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed an IPv4 address that a
   // gateway would forward to, so judge them by the embedded address.
   const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((x) => x === 0);
   if (nat64) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
   if (first16 === 0x2002) return isPrivateIpv4(toIpv4(groups[1], groups[2]));
-  return allZero || loopback || linkLocal || uniqueLocal || multicast;
+  return linkLocal || uniqueLocal || multicast;
 }
 
 export function isPrivateIp(value) {
@@ -111,7 +113,9 @@ export async function resolveAndValidateRemoteUrl(value) {
   const validation = validateRemoteUrl(value);
   if (!validation.valid) return validation;
 
-  const hostname = new URL(validation.url).hostname;
+  // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"),
+  // which getaddrinfo cannot resolve. Strip them so public IPv6 literals work.
+  const hostname = new URL(validation.url).hostname.replace(/^\[|\]$/g, "");
   let records;
   let timer;
   try {
@@ -137,8 +141,8 @@ export async function resolveAndValidateRemoteUrl(value) {
   }
 
   // Callers should pin the actual socket to these exact addresses (see
-  // createPinnedLookup below) instead of letting fetch() re-resolve the
-  // hostname at connect time. Otherwise a low-TTL DNS answer can rebind to a
+  // createPinnedLookup below) instead of letting the HTTP client re-resolve
+  // the hostname at connect time. Otherwise a low-TTL DNS answer can rebind to a
   // private address in the gap between this check and the connection
   // (TOCTOU DNS rebinding) even though this lookup was clean.
   return {
@@ -149,9 +153,10 @@ export async function resolveAndValidateRemoteUrl(value) {
 
 // Builds a Node-style `lookup(hostname, options, callback)` function that
 // always answers with the given pre-validated addresses, regardless of what
-// a live DNS query would return. Pass it as `connect.lookup` on an undici
-// Agent and use that Agent as fetch()'s `dispatcher` to pin a request to
-// addresses that have already been checked by resolveAndValidateRemoteUrl.
+// a live DNS query would return. Pass it as the `lookup` option of
+// http/https.request (see requestPinned in functions/index.js) to pin a
+// request to addresses that have already been checked by
+// resolveAndValidateRemoteUrl.
 export function createPinnedLookup(records) {
   return function pinnedLookup(hostname, options, callback) {
     const opts = options && typeof options === "object" ? options : {};
