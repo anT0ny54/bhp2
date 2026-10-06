@@ -84,7 +84,20 @@ async function runDiagnostics() {
     const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
     const ratio = original > 0 ? `${((saved / original) * 100).toFixed(1)}% saved` : "size telemetry unavailable";
     const compressedOk = image.ok && type.startsWith("image/") && original > 0;
-    setStatus("compression", compressedOk ? "ok" : "fail", compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : sharpOk ? `HTTP ${image.status}` : sharpError);
+    // On failure, surface the server's error body so a broken upstream path
+    // is diagnosable straight from the diagnostics panel.
+    let compressionDetail = `HTTP ${image.status}`;
+    if (!compressedOk) {
+      try {
+        const serverMessage = (await image.text()).trim().slice(0, 160);
+        if (serverMessage) compressionDetail = `HTTP ${image.status}: ${serverMessage}`;
+      } catch {}
+    }
+    setStatus(
+      "compression",
+      compressedOk ? "ok" : "fail",
+      compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : sharpOk ? compressionDetail : sharpError
+    );
 
     const cache = image.headers.get("cache-control") || "";
     const cacheOk = /^public,/i.test(cache);

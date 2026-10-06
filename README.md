@@ -9,7 +9,7 @@ delivers optimized versions to dramatically reduce bandwidth usage. It ships
 with a mobile-friendly diagnostics page (`index.html` + `site.js` + `site.css`)
 and a JSON health endpoint (`/api/health`).
 
-🖮️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/)
+🖮️ **Live Demo:** [Bandwidth Hero](https://bhp2.netlify.app/)
 
 📋 **Changelog:** [CHANGELOG.md](CHANGELOG.md) ·
 **API contract:** [docs/backend-contract.md](docs/backend-contract.md)
@@ -35,8 +35,12 @@ and a JSON health endpoint (`/api/health`).
   re-validated and re-pinned; credentials stripped on cross-origin hops
 - **SSRF protection**: HTTP/HTTPS-only URLs; private/loopback/link-local/
   CGNAT/multicast/reserved IPv4 **and** IPv6 blocking; DNS validated before
-  each request and the socket pinned to the validated addresses via an
-  `undici` dispatcher (DNS-rebinding/TOCTOU protection)
+  each request and the socket pinned to the validated addresses via the
+  native `lookup` option of `node:http`/`node:https` (DNS-rebinding/TOCTOU
+  protection)
+- **Diagnosable failures**: connector errors return
+  `502 Upstream connection failed [<code>].` instead of an opaque 500, and the
+  diagnostics page shows the server's error message
 - **Upstream limits**: 8 s total fetch timeout (one deadline for all hops and
   the body download), 15 MB input, 40 MP input pixels
 - **Allow-listed upstream response headers** (`etag`, `last-modified`,
@@ -72,12 +76,14 @@ Full contract: [`docs/backend-contract.md`](docs/backend-contract.md).
   pins Node.js **22.23.3** (`netlify.toml`)
 - **Yarn Classic** 1.22.22 (`packageManager`; the repository's `yarn.lock` is
   the authoritative lockfile)
-- **Dependencies** (exact-pinned): `sharp` 0.35.5, `undici` 8.11.2
+- **Dependencies** (exact-pinned): `sharp` 0.35.5 only — upstream fetching
+  uses Node's standard-library `node:http`/`node:https`
 - **Netlify CLI** for local development (`yarn dev` / `yarn start`)
 
 ## 🧪 Testing
 
 ```bash
+yarn install     # regenerate yarn.lock after the undici removal
 yarn test        # node --test tests/index.test.js tests/health.test.js
 yarn check       # full local gate (syntax validation + tests), identical to CI
 ```
@@ -96,18 +102,14 @@ Coverage of the current suites (all network-free):
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname
 > via DNS, rejects the request if any resolved address is private, and pins
-> the outbound connection to exactly those validated addresses via an `undici`
-> `Agent` with a custom `connect.lookup` (`createPinnedDispatcher` in
-> `functions/index.js`). This closes the standard DNS-rebinding TOCTOU gap:
-> Node's built-in `fetch()` ignores the legacy `http(s).Agent` option and
-> always re-resolves the hostname itself at connect time, so a check performed
-> beforehand doesn't otherwise constrain where the connection actually goes.
-> Each redirect hop is re-resolved, re-checked, and re-pinned the same way.
-> This is the one accepted exception to the Dependency Policy's "no new
-> dependencies" preference: there is no supported way to pin a `fetch()`
-> connection using only Node's standard library, so `undici` — the library
-> that already powers `fetch()` internally — is a direct dependency for this
-> specific purpose.
+> the outbound connection to exactly those validated addresses by passing a
+> pinned `lookup` function to Node's native `http`/`https.request`
+> (`requestPinned` in `functions/index.js`). This closes the standard
+> DNS-rebinding TOCTOU gap: the socket can only ever connect to an address
+> that was checked milliseconds earlier, and each redirect hop is
+> re-resolved, re-checked, and re-pinned the same way. This is implemented
+> with the Node standard library only — no third-party HTTP client — which
+> also removes an entire class of bundling/runtime interop failures.
 
 ---
 
@@ -139,7 +141,7 @@ If a proposed change satisfies none of these, it will not be accepted.
 1. **Prefer simpler code** over clever abstractions.
 2. **Prefer fewer dependencies** to keep the footprint tiny.
 3. **Prefer backward compatibility** at all times to prevent breaking active
-   client extensions.
+  client extensions.
 4. **Prefer serverless-first solutions** matching free tier environments.
 5. **Benchmark before optimizing**. Do not optimize based on assumptions.
 
@@ -154,8 +156,8 @@ This project's greatest asset is its minimal size.
 - **Preference**: Removing or inlining custom utilities is preferred over
   adding packages.
 - **Standard Library**: Always prefer native Node.js functionality (e.g.,
-  global `Fetch API`, `AbortController`, `Buffer`) over third-party
-  equivalents.
+  `node:http`/`node:https`, global `Fetch API`, `AbortController`, `Buffer`)
+  over third-party equivalents.
 
 ---
 
