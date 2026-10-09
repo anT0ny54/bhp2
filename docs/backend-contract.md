@@ -37,8 +37,17 @@ values are clamped (`quality` 1–100, `max_width` 0–8192).
 | Upstream fetch deadline (all redirect hops + body download) | 8 s |
 | Redirects followed | 5 |
 | Source image size | 15 MB |
-| Source image pixels | 40 MP |
+| Source image pixels | 24 MP |
 | Response size target (before base64) | 4.3 MB |
+
+## Serverless image-processing defaults
+
+- Sharp WebP uses `effort: 4` to favor response time over maximum compression effort.
+- Sharp uses `concurrency(1)` to keep per-image native thread usage predictable; this does not cap concurrent function invocations.
+- Input decoding is limited to 24 MP by default. Increase only after measuring peak memory and concurrent-request behavior on a Netlify deploy preview.
+- Sharp cache and Node/libuv thread-pool defaults are unchanged until benchmarks show they are a bottleneck.
+
+These are conservative defaults, not measured performance guarantees. Validate with representative JPEG, PNG, WebP, and animated inputs before production rollout.
 
 ## Compatibility
 
