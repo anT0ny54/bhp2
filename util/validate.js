@@ -14,36 +14,84 @@ async function defaultDnsLookup(hostname) {
 export function setDnsLookupForTests(lookup) { dnsLookup = lookup; }
 export function resetDnsLookupForTests() { dnsLookup = defaultDnsLookup; }
 
-function ipv4ToNumber(value) {
-  const parts = value.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return null;
-  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+// ---------------------------------------------------------------------------
+// Address policy
+//
+// The proxy only ever connects to addresses that are plausibly *public
+// internet* hosts. The policy is deliberately explicit and table-driven so it
+// can be audited against the IANA special-purpose registries:
+//   https://www.iana.org/assignments/iana-ipv4-special-registry/
+//   https://www.iana.org/assignments/iana-ipv6-special-registry/
+//   https://www.iana.org/assignments/ipv6-address-space/
+//
+// IPv4: every IANA special-purpose block that is not a globally routable
+// unicast range is rejected. Everything else is allowed.
+//
+// IPv6: only 2000::/3 (the IANA-designated global-unicast space) is a
+// candidate at all; every address outside it is rejected. Inside 2000::/3 the
+// special-purpose carve-outs below are rejected, and everything else stays
+// allowed. This is NOT a blanket block of allocated IPv6 space.
+//
+// IPv6 forms that embed an IPv4 address (IPv4-mapped, NAT64, 6to4) are judged
+// by the embedded IPv4 address instead, because a gateway would forward there.
+// ---------------------------------------------------------------------------
+export const BLOCKED_IPV4_CIDRS = Object.freeze([
+  ["0.0.0.0/8", "'This network' (RFC 1122)"],
+  ["10.0.0.0/8", "Private use (RFC 1918)"],
+  ["100.64.0.0/10", "Shared address space / CGNAT (RFC 6598)"],
+  ["127.0.0.0/8", "Loopback (RFC 1122)"],
+  ["169.254.0.0/16", "Link-local, incl. cloud metadata (RFC 3927)"],
+  ["172.16.0.0/12", "Private use (RFC 1918)"],
+  ["192.0.0.0/24", "IETF protocol assignments (RFC 6890)"],
+  ["192.0.2.0/24", "Documentation, TEST-NET-1 (RFC 5737)"],
+  ["192.88.99.0/24", "Deprecated 6to4 relay anycast (RFC 7526)"],
+  ["192.168.0.0/16", "Private use (RFC 1918)"],
+  ["198.18.0.0/15", "Benchmarking (RFC 2544)"],
+  ["198.51.100.0/24", "Documentation, TEST-NET-2 (RFC 5737)"],
+  ["203.0.113.0/24", "Documentation, TEST-NET-3 (RFC 5737)"],
+  ["224.0.0.0/4", "Multicast (RFC 5771)"],
+  ["240.0.0.0/4", "Reserved for future use, incl. broadcast (RFC 1112)"],
+]);
+
+// Carve-outs *inside* 2000::/3. Addresses outside 2000::/3 are rejected by
+// the global-unicast rule in isPrivateIpv6() and are not repeated here (that
+// includes e.g. 5f00::/16, the SRv6 SID block from RFC 9602).
+export const IPV6_GLOBAL_UNICAST_CIDR = "2000::/3";
+export const BLOCKED_IPV6_CIDRS = Object.freeze([
+  ["2001::/23", "IETF protocol assignments: Teredo, benchmarking, ORCHID, AMT, ... (RFC 2928)"],
+  ["2001:db8::/32", "Documentation (RFC 3849)"],
+  ["3fff::/20", "Documentation (RFC 9637)"],
+]);
+
+function buildBlockList(entries, family) {
+  const list = new net.BlockList();
+  for (const [cidr] of entries) {
+    const [address, prefix] = cidr.split("/");
+    list.addSubnet(address, Number(prefix), family);
+  }
+  return list;
 }
 
+const BLOCKED_IPV4 = buildBlockList(BLOCKED_IPV4_CIDRS, "ipv4");
+const BLOCKED_IPV6 = buildBlockList(BLOCKED_IPV6_CIDRS, "ipv6");
+
 function isPrivateIpv4(value) {
-  const n = ipv4ToNumber(value);
-  if (n === null) return true;
-  const a = n >>> 24;
-  const b = (n >>> 16) & 255;
-  return a === 0 || a === 10 || a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    // 192.0.0.0/24 is IETF protocol-assignments/reserved and not a
-    // legitimate public image host, so treat it like the other reserved
-    // ranges above instead of letting it through the SSRF filter.
-    (a === 192 && b === 0) ||
-    (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19)) || a >= 224;
+  // Callers pass a string that net.isIP() already classified as IPv4; the
+  // format check is kept so malformed input fails closed.
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return true;
+  if (value.split(".").some((part) => Number(part) > 255)) return true;
+  return BLOCKED_IPV4.check(value, "ipv4");
 }
 
 function expandIpv6(value) {
   let address = value.toLowerCase();
   if (address.includes(".")) {
     const lastColon = address.lastIndexOf(":");
-    const ipv4 = ipv4ToNumber(address.slice(lastColon + 1));
-    if (ipv4 === null) return null;
-    address = `${address.slice(0, lastColon)}:${((ipv4 >>> 16) & 0xffff).toString(16)}:${(ipv4 & 0xffff).toString(16)}`;
+    const octets = address.slice(lastColon + 1).split(".").map(Number);
+    if (octets.length !== 4 || octets.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return null;
+    const high = (octets[0] << 8) | octets[1];
+    const low = (octets[2] << 8) | octets[3];
+    address = `${address.slice(0, lastColon)}:${high.toString(16)}:${low.toString(16)}`;
   }
   const parts = address.split("::");
   if (parts.length > 2) return null;
@@ -56,27 +104,28 @@ function expandIpv6(value) {
 }
 
 function isPrivateIpv6(value) {
-  const normalized = value.toLowerCase();
-  const groups = expandIpv6(normalized);
+  const groups = expandIpv6(value.toLowerCase());
   if (!groups || groups.length !== 8) return true;
-  const first16 = groups[0];
-  // fe80::/10 link-local plus the deprecated fec0::/10 site-local range.
-  const linkLocal = first16 >= 0xfe80 && first16 <= 0xfeff;
-  const uniqueLocal = first16 >= 0xfc00 && first16 <= 0xfdff;
-  const multicast = first16 >= 0xff00 && first16 <= 0xffff;
   const toIpv4 = (high, low) => [high >>> 8, high & 255, low >>> 8, low & 255].join(".");
-  // ::/96 (IPv4-compatible, plus "::" and "::1") and ::ffff:0:0/96
-  // (IPv4-mapped) both embed an IPv4 address; judge them by that address so
-  // forms like ::a9fe:a9fe (169.254.169.254) cannot slip past the filter.
-  const compatible = groups.slice(0, 6).every((x) => x === 0);
-  const mapped = groups.slice(0, 5).every((x) => x === 0) && groups[5] === 0xffff;
-  if (compatible || mapped) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
-  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed an IPv4 address that a
-  // gateway would forward to, so judge them by the embedded address.
-  const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((x) => x === 0);
-  if (nat64) return isPrivateIpv4(toIpv4(groups[6], groups[7]));
-  if (first16 === 0x2002) return isPrivateIpv4(toIpv4(groups[1], groups[2]));
-  return linkLocal || uniqueLocal || multicast;
+
+  // IPv4-mapped (::ffff:0:0/96), NAT64 (64:ff9b::/96) and 6to4 (2002::/16)
+  // embed an IPv4 address that a gateway would forward to; judge them by that
+  // address so e.g. ::ffff:169.254.169.254 cannot slip past the filter.
+  if (groups.slice(0, 5).every((x) => x === 0) && groups[5] === 0xffff) {
+    return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+  }
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((x) => x === 0)) {
+    return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+  }
+  if (groups[0] === 0x2002) return isPrivateIpv4(toIpv4(groups[1], groups[2]));
+
+  // Default-deny outside global unicast (2000::/3). This covers unspecified,
+  // loopback, deprecated IPv4-compatible (::/96), local-use NAT64
+  // (64:ff9b:1::/48), discard (100::/64), ULA (fc00::/7), link-local
+  // (fe80::/10), deprecated site-local (fec0::/10) and multicast (ff00::/8).
+  if ((groups[0] & 0xe000) !== 0x2000) return true;
+
+  return BLOCKED_IPV6.check(groups.map((x) => x.toString(16)).join(":"), "ipv6");
 }
 
 export function isPrivateIp(value) {
@@ -109,28 +158,46 @@ export function validateRemoteUrl(value) {
   return { valid: true, url: url.toString() };
 }
 
-export async function resolveAndValidateRemoteUrl(value) {
+// `options.signal` is the caller's shared deadline. When it fires, the DNS
+// wait is abandoned immediately (the signal's reason is thrown) instead of
+// lingering until the 2 s DNS timeout, and no result is returned for the caller
+// to act on after the deadline. `options.timeoutMs` overrides the DNS timeout.
+export async function resolveAndValidateRemoteUrl(value, options = {}) {
+  const { signal, timeoutMs = DNS_LOOKUP_TIMEOUT_MS } = options;
   const validation = validateRemoteUrl(value);
   if (!validation.valid) return validation;
+
+  signal?.throwIfAborted();
 
   // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"),
   // which getaddrinfo cannot resolve. Strip them so public IPv6 literals work.
   const hostname = new URL(validation.url).hostname.replace(/^\[|\]$/g, "");
   let records;
   let timer;
+  let onAbort;
   try {
     records = await Promise.race([
       dnsLookup(hostname),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), DNS_LOOKUP_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), timeoutMs);
+      }),
+      new Promise((_, reject) => {
+        if (!signal) return;
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
       }),
     ]);
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     return { valid: false, error: DNS_RESOLUTION_ERROR, statusCode: 502 };
   } finally {
-    // Don't leave a dangling timer per request once the lookup has settled.
+    // Don't leave a dangling timer/listener per request once the lookup settled.
     clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
   }
+
+  // A lookup that finished in the same tick as the deadline must not be acted on.
+  signal?.throwIfAborted();
 
   if (
     !Array.isArray(records) ||
