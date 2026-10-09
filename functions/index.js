@@ -30,7 +30,8 @@ const DEFAULT_MAX_WIDTH = 0;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_REDIRECTS = 5;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
-const MAX_INPUT_PIXELS = 40_000_000;
+// Conservative default for serverless memory headroom; raise only after load testing.
+const MAX_INPUT_PIXELS = 24_000_000;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_300_000;
@@ -56,7 +57,13 @@ let sharpPromise;
 
 async function getSharp() {
   if (!sharpPromise) {
-    sharpPromise = import("sharp").then((module) => module.default || module);
+    sharpPromise = import("sharp").then((module) => {
+      const sharp = module.default || module;
+      // Favor predictable memory use on small serverless instances. This limits
+      // libvips threads per image; it does not limit concurrent invocations.
+      sharp.concurrency(1);
+      return sharp;
+    });
   }
   try {
     return await sharpPromise;
@@ -384,7 +391,8 @@ async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
   return useWebp
     ? pipeline.webp({
         quality,
-        effort: 6,
+        // Effort 4 is a balanced speed/size trade-off for serverless CPU budgets.
+        effort: 4,
         smartSubsample: true,
         minSize: true,
         mixed: true,
