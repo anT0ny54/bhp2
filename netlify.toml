@@ -7,11 +7,14 @@
 
 [functions]
   node_bundler = "esbuild"
-  # Keep Sharp and its platform-specific native packages available at runtime.
+  # Keep Sharp external because it loads native binaries at runtime.
   external_node_modules = ["sharp"]
+  # Netlify Node.js Functions use Linux x86_64 in this deployment.
+  # Include only Sharp's matching native runtime packages, not every @img platform.
   included_files = [
     "node_modules/sharp/**/*",
-    "node_modules/@img/**/*"
+    "node_modules/@img/sharp-linux-x64/**/*",
+    "node_modules/@img/sharp-libvips-linux-x64/**/*"
   ]
 
 [[redirects]]

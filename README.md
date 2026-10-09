@@ -51,7 +51,14 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
   upstream that stalls past the deadline returns `504`, and the diagnostics
   page shows the server's error message
 - **Upstream limits**: 8 s total fetch timeout (one deadline for all hops and
-  the body download), 15 MB input, 40 MP input pixels
+  the body download), 15 MiB input, 24 MP input pixels
+- **Serverless processing defaults**: WebP quality 60 and `effort: 4`; Sharp
+  uses `concurrency(1)` to limit libvips threads per image, not total concurrent
+  function invocations. The Sharp cache and Node/libuv thread-pool defaults are
+  unchanged.
+- **Current encoder options**: WebP uses `smartSubsample: true`, `minSize: true`,
+  and `mixed: true`; JPEG uses progressive encoding, `mozjpeg: true`, and
+  `4:2:0` chroma subsampling.
 - **Allow-listed upstream response headers** (`etag`, `last-modified`,
   `expires`), forwarded only when the original bytes are returned unchanged
 - **CORS support** for cross-origin requests
@@ -66,7 +73,10 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 - **Built-in diagnostics page** with reachability, CORS/handshake, live image
   compression, and cache-header checks
 - **Netlify Functions** deployment ready (esbuild; Sharp externalized with
-  native `@img` packages included)
+  native `@img` packages included). `netlify.toml` currently includes the full
+  `node_modules/sharp` and `node_modules/@img` trees; this is compatibility-
+  oriented, not proof that the deployed artifact contains only the active
+  platform binaries. Inspect the built function artifact before narrowing it.
 
 ## 🔌 API
 
@@ -89,7 +99,8 @@ Full contract (status codes, limits, headers):
   the authoritative lockfile)
 - **Runtime dependency** (exact-pinned): `sharp` 0.35.5, plus its native
   Linux x64/arm64 `@img` packages as `optionalDependencies` (these must stay
-  enabled during installation). Upstream fetching uses Node's standard-library
+  enabled during installation). The current native libvips pins are 1.3.4 for
+  both architectures. Upstream fetching uses Node's standard-library
   `node:http`/`node:https`, so there is no HTTP-client dependency.
 - **Dev dependency**: `netlify-cli` for local development (`yarn dev` /
   `yarn start`)
@@ -124,8 +135,12 @@ Coverage of the current suites (19 tests, all network-free):
   `docs/backend-contract.md` report the same version; shared CORS/security
   headers are present on health responses.
 
-The upstream fetch path itself (redirects, pinning, limits) is not covered by
-the offline suites because the SSRF filter correctly refuses local servers.
+The upstream fetch path itself (redirects, pinning, body-size/deadline handling,
+and image encoding) is not exercised end-to-end by the offline suites. The
+current tests validate URL/DNS security and handler behavior without contacting
+real upstream hosts. A passing test suite therefore does not establish real
+Netlify latency, peak memory, cold-start time, deployment artifact size, or
+concurrent-load safety; validate those separately with a Deploy Preview.
 
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname
@@ -202,8 +217,9 @@ This project's greatest asset is its minimal size.
   - Overall deployment processes.
 
 Every release must update `package.json`, `util/version.js`,
-`docs/backend-contract.md`, and `CHANGELOG.md` together. The test suite fails
-if the first three disagree on the version.
+`docs/backend-contract.md`, and `CHANGELOG.md` together. The current tests check
+that `package.json`, `util/version.js`, and `docs/backend-contract.md` agree on
+the version and feature metadata; they do not validate changelog contents.
 
 ---
 
@@ -214,22 +230,19 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Blocklist | DNS-over-HTTPS (DoH) |
 | :--- | :--- |
 | Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns.mydoh.workers.dev/dns-query` (Recommended) |
 | Multi Pro + TIF | `https://dns-pi.vercel.app/api/doh/dns-query` (Recommended) |
 | Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
-| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not use in 15 minute) |
-| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not use in 15 minute) |
+| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
+| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
----
-
-# ⚡ Bandwidth Hero Server
-
-A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
-
-Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
-
-🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 
 ## Supporting the Project
 
 If you find this project useful, donations are appreciated:
+
 - **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
+
+## License
+
+See [`LICENSE`](LICENSE).
