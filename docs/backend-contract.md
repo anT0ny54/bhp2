@@ -1,6 +1,6 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.14  
+**Version:** 2.2.15  
 **API:** 1  
 **Status:** Stable
 
@@ -34,7 +34,8 @@ values are clamped (`quality` 1–100, `max_width` 0–8192).
 
 | Limit | Value |
 |---|---|
-| Upstream fetch deadline (all redirect hops + body download) | 8 s |
+| Upstream fetch deadline (DNS resolution + all redirect hops + body download) | 8 s |
+| DNS lookup timeout (per hop, also bounded by the deadline above) | 2 s |
 | Redirects followed | 5 |
 | Source image size | 15 MB |
 | Source image pixels | 24 MP |
@@ -72,7 +73,7 @@ HTTP/1.1 200 OK
 Content-Type: image/webp
 Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.14
+X-BH-Version: 2.2.15
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -124,7 +125,8 @@ a broken deployment is diagnosable from the response body.
 
 - Only HTTP and HTTPS URLs are accepted.
 - Localhost, loopback, RFC1918, link-local, CGNAT, multicast and other private
-  address ranges are rejected.
+  or special-purpose address ranges are rejected; see
+  [Address policy](#address-policy) for the exact ranges.
 - DNS answers are resolved and checked before every upstream request, and the
   outbound connection is pinned to exactly those validated addresses via the
   `lookup` option of Node's native `http`/`https.request`, so a hostname can't
@@ -133,12 +135,63 @@ a broken deployment is diagnosable from the response body.
   way before each hop is fetched.
 - Cookie and Referer request headers are stripped when a redirect crosses
   origins; same-origin redirects keep them for compatibility.
-- IPv6 addresses that embed an IPv4 address (IPv4-compatible `::a.b.c.d`,
-  IPv4-mapped, NAT64 and 6to4) are judged by the embedded IPv4 address.
+- IPv6 addresses that embed an IPv4 address (IPv4-mapped, NAT64 and 6to4) are
+  judged by the embedded IPv4 address.
+- One 8 s deadline covers DNS resolution, every redirect hop and the body
+  download. The DNS step observes the same abort signal, the deadline is
+  checked before each hop and immediately before each upstream request, and a
+  DNS answer that arrives after the deadline is discarded, so no upstream
+  request is started once the deadline has passed (`504`).
 - Upstream response headers are allow-listed (`etag`, `last-modified`,
   `expires`) and are forwarded only when the original bytes are returned; a
   re-encoded image is a new representation and gets none of them.
 - Cookie-bearing requests use private, no-store caching.
+
+### Address policy
+
+The policy is table-driven (`BLOCKED_IPV4_CIDRS` and `BLOCKED_IPV6_CIDRS` in
+`util/validate.js`) and is checked against the IANA special-purpose registries.
+Every address a hostname resolves to must pass; one blocked answer rejects the
+whole request.
+
+**IPv4: rejected ranges** (everything else is allowed)
+
+| Range | Purpose |
+|---|---|
+| `0.0.0.0/8` | "This network" |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | Private use (RFC 1918) |
+| `100.64.0.0/10` | Shared address space / CGNAT |
+| `127.0.0.0/8` | Loopback |
+| `169.254.0.0/16` | Link-local (includes cloud metadata endpoints) |
+| `192.0.0.0/24` | IETF protocol assignments |
+| `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | Documentation (TEST-NET-1/2/3) |
+| `192.88.99.0/24` | Deprecated 6to4 relay anycast |
+| `198.18.0.0/15` | Benchmarking |
+| `224.0.0.0/4` | Multicast |
+| `240.0.0.0/4` | Reserved, including `255.255.255.255` |
+
+The rest of `192.0.0.0/16` is ordinary public address space and is allowed.
+
+**IPv6: rule set**
+
+1. IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`)
+   addresses are judged by the IPv4 address they embed, using the table above.
+2. Only global unicast `2000::/3` can be allowed. Everything outside it is
+   rejected: unspecified and loopback, the deprecated IPv4-compatible `::/96`,
+   discard `100::/64`, local-use NAT64 `64:ff9b:1::/48`, unique-local
+   `fc00::/7`, link-local `fe80::/10`, site-local `fec0::/10`, multicast
+   `ff00::/8`, and all other unassigned space.
+3. Inside `2000::/3` these ranges are rejected: `2001::/23` (IETF protocol
+   assignments: Teredo, benchmarking, ORCHID, AMT and others),
+   `2001:db8::/32` (documentation) and `3fff::/20` (documentation).
+4. All other addresses in `2000::/3` are allowed. Allocated global unicast
+   space is deliberately not blanket-blocked.
+
+Malformed or unparseable addresses are rejected.
+
+This is a connection-target policy for an outbound proxy. It does not claim
+that allowed addresses are reachable or safe in a particular network
+environment.
 
 ## Caching
 
@@ -154,9 +207,12 @@ Cookie-bearing requests use `private, no-store`.
 
 ## Netlify deployment
 
-The project uses esbuild bundling and explicitly externalizes Sharp while
-including its native `@img` packages. Sharp optional dependencies must remain
-enabled during installation. Upstream fetches use only Node standard-library
+The project uses esbuild bundling and explicitly externalizes Sharp. `netlify.toml`
+includes only `node_modules/sharp` and the Linux x64 native packages
+(`@img/sharp-linux-x64`, `@img/sharp-libvips-linux-x64`) in the function; the
+ARM64 packages listed in `package.json` support installs on ARM64 machines and
+are not packaged. Sharp optional dependencies must remain enabled during
+installation. Upstream fetches use only Node standard-library
 modules (`node:http` / `node:https`).
 
 Netlify's buffered synchronous function responses are limited to 6 MB. Because
