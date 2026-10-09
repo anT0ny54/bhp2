@@ -35,23 +35,30 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
   grow the file
 - **Adaptive output fallback**: quality, then width, are progressively reduced
   to stay under Netlify's 6 MB buffered response limit (4.3 MB binary safety
-  target)
+  target). Fallback widths are always strictly below a requested `max_width`
+  and continue down to 16 px, so even small limits (for example
+  `max_width=100`) still have narrower sizes to try; images are never enlarged
 - **Manual redirect handling**: bounded at 5 hops; every hop is re-resolved,
   re-validated and re-pinned; `Cookie`/`Referer` are stripped on cross-origin
   hops
-- **SSRF protection**: HTTP/HTTPS-only URLs; private/loopback/link-local/
-  CGNAT/multicast/reserved IPv4 **and** IPv6 blocking (including IPv6
-  addresses that embed an IPv4 address: IPv4-compatible, IPv4-mapped, NAT64
-  and 6to4); DNS validated before each request and the socket pinned to the
-  validated addresses via the native `lookup` option of `node:http`/
-  `node:https` (DNS-rebinding/TOCTOU protection). Public IPv6 literal URLs
-  are supported.
+- **SSRF protection**: HTTP/HTTPS-only URLs; an explicit, table-driven
+  address policy covering private, loopback, link-local, CGNAT, documentation,
+  benchmarking, multicast and reserved IPv4 **and** IPv6 ranges (IPv6 allows
+  only global unicast `2000::/3` minus special-purpose carve-outs; IPv6 forms
+  that embed an IPv4 address — IPv4-mapped, NAT64 and 6to4 — are judged by the
+  embedded address). The exact ranges are listed in the
+  [address policy](docs/backend-contract.md#address-policy). DNS is validated
+  before each request and the socket is pinned to the validated addresses via
+  the native `lookup` option of `node:http`/`node:https`
+  (DNS-rebinding/TOCTOU protection). Public IPv6 literal URLs are supported.
 - **Diagnosable failures**: connector errors return
   `502 Upstream connection failed [<code>].` instead of an opaque 500, an
   upstream that stalls past the deadline returns `504`, and the diagnostics
   page shows the server's error message
-- **Upstream limits**: 8 s total fetch timeout (one deadline for all hops and
-  the body download), 15 MiB input, 24 MP input pixels
+- **Upstream limits**: 8 s total fetch timeout (one deadline for DNS
+  resolution, all hops and the body download; a stalled resolver is abandoned
+  at the deadline and no request starts after it), 15 MiB input, 24 MP input
+  pixels
 - **Serverless processing defaults**: WebP quality 60 and `effort: 4`; Sharp
   uses `concurrency(1)` to limit libvips threads per image, not total concurrent
   function invocations. The Sharp cache and Node/libuv thread-pool defaults are
@@ -72,11 +79,16 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
   API level and features
 - **Built-in diagnostics page** with reachability, CORS/handshake, live image
   compression, and cache-header checks
-- **Netlify Functions** deployment ready (esbuild; Sharp externalized with
-  native `@img` packages included). `netlify.toml` currently includes the full
-  `node_modules/sharp` and `node_modules/@img` trees; this is compatibility-
-  oriented, not proof that the deployed artifact contains only the active
-  platform binaries. Inspect the built function artifact before narrowing it.
+- **Netlify Functions** deployment ready (esbuild; Sharp externalized).
+  `netlify.toml` includes only `node_modules/sharp` (the JavaScript package)
+  plus the two **Linux x64** native packages, `@img/sharp-linux-x64` and
+  `@img/sharp-libvips-linux-x64`, because Netlify Node.js Functions run on
+  Linux x86_64 here. It does **not** include the whole `node_modules/@img`
+  tree. The ARM64 packages pinned in `package.json` exist so installs work on
+  ARM64 machines; they are not packaged into the deployed function. This
+  describes the configuration, not a measured artifact: before changing which
+  native packages are included (for example if the runtime architecture ever
+  changes), inspect the built function artifact.
 
 ## 🔌 API
 
@@ -100,7 +112,9 @@ Full contract (status codes, limits, headers):
 - **Runtime dependency** (exact-pinned): `sharp` 0.35.5, plus its native
   Linux x64/arm64 `@img` packages as `optionalDependencies` (these must stay
   enabled during installation). The current native libvips pins are 1.3.4 for
-  both architectures. Upstream fetching uses Node's standard-library
+  both architectures. Only the x64 packages are included in the deployed
+  Netlify function (see `netlify.toml`); the arm64 pins support installation
+  on ARM64 Linux machines. Upstream fetching uses Node's standard-library
   `node:http`/`node:https`, so there is no HTTP-client dependency.
 - **Dev dependency**: `netlify-cli` for local development (`yarn dev` /
   `yarn start`)
@@ -113,34 +127,41 @@ Full contract (status codes, limits, headers):
 ## 🧪 Testing
 
 ```bash
-yarn install       # installs dependencies; keeps yarn.lock in sync
-yarn test          # node --test tests/index.test.js tests/health.test.js
-yarn run check     # full local gate (syntax validation + tests), same as CI
+yarn install               # installs dependencies; keeps yarn.lock in sync
+yarn test                  # every suite below (82 tests)
+yarn test:fast             # network-free suites only (33 tests, well under a second)
+yarn test:integration      # Sharp + local-server suites (49 tests, roughly 15 s)
+yarn run check             # full local gate (syntax validation + all tests), same as CI
 ```
 
 > [!IMPORTANT]
 > Use `yarn run check`, not `yarn check`. `check` is a built-in Yarn Classic
 > command (lockfile integrity check) and takes precedence over the script.
 
-Coverage of the current suites (19 tests, all network-free):
+CI (`.github/workflows/ci.yml`) runs `yarn run check` on every pull request and
+on pushes to `main`, using Node.js 22.23.3 and `yarn install --frozen-lockfile`.
 
-- **Compatibility tests**: the `bandwidth-hero-proxy` handshake, CORS
-  preflight, and 405 handling.
-- **Security tests**: host validation blocks (SSRF) — loopback, RFC1918,
-  link-local, CGNAT, IETF-reserved (192.0.0.0/24) and IPv6 private ranges
-  including embedded-IPv4 forms; URL parser acceptance/rejection; DNS pin
-  lookup behavior; DNS resolution validation (private answers rejected, DNS
-  failure → 502, IPv6 literal hostnames).
-- **Consistency tests**: `package.json`, `util/version.js`, `/api/health` and
-  `docs/backend-contract.md` report the same version; shared CORS/security
-  headers are present on health responses.
+Suites:
 
-The upstream fetch path itself (redirects, pinning, body-size/deadline handling,
-and image encoding) is not exercised end-to-end by the offline suites. The
-current tests validate URL/DNS security and handler behavior without contacting
-real upstream hosts. A passing test suite therefore does not establish real
-Netlify latency, peak memory, cold-start time, deployment artifact size, or
-concurrent-load safety; validate those separately with a Deploy Preview.
+| File | Scope |
+|---|---|
+| `tests/index.test.js` | Handler behavior (handshake, CORS, 405, URL/host rejection), URL parsing, pinned lookup, DNS validation, and the DNS step's handling of the shared deadline. No network, no Sharp. |
+| `tests/health.test.js` | `/api/health` plus version/feature consistency across `package.json`, `util/version.js` and `docs/backend-contract.md`. |
+| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries (first/last address inside, neighbours outside), IPv6 global-unicast edges, IANA special-purpose fixtures, embedded-IPv4 forms, and fail-closed handling of malformed input. |
+| `tests/compress.test.js` | Adaptive fallback widths and `compressImage` with real Sharp encodes, including regression tests for `max_width` 100, 320 and 800, JPEG output, never-enlarge and the `413` case. |
+| `tests/integration.test.js` | The full handler against local `node:http` servers: WebP/JPEG output, grayscale, resizing, animation preservation, original-bytes fallback and headers, redirects (same-origin, cross-origin credential stripping, private targets, redirect limit), socket pinning, input-size limits, malformed/truncated images, upstream errors, and the shared 8 s deadline (slow body, stalled DNS, DNS stalling mid-redirect-chain, late DNS answers, accumulated slow hops). |
+
+The integration suites use a small test-only configuration hook in
+`functions/index.js` (`configureForTests`) to shorten the deadline and shrink
+size limits, and a test resolver that maps validated test hostnames to
+`127.0.0.1`. Production defaults are unchanged and the hook is not reachable
+from a request.
+
+What the suites do **not** establish: HTTPS requests (a trusted test
+certificate would be needed; the pinning mechanism is the same `lookup` option
+for both protocols), behavior against real internet hosts, and real Netlify
+latency, peak memory, cold-start time, deployment artifact size or
+concurrent-load safety. Validate those separately with a Deploy Preview.
 
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname
@@ -219,7 +240,9 @@ This project's greatest asset is its minimal size.
 Every release must update `package.json`, `util/version.js`,
 `docs/backend-contract.md`, and `CHANGELOG.md` together. The current tests check
 that `package.json`, `util/version.js`, and `docs/backend-contract.md` agree on
-the version and feature metadata; they do not validate changelog contents.
+the version and feature metadata; they do not validate changelog contents, so
+add the changelog entry as part of the same change. Only record changes that
+can be verified; do not reconstruct history from memory.
 
 ---
 
