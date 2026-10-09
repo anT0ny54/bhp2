@@ -1,6 +1,8 @@
 // Compatibility and security tests for the proxy handler and URL validation.
 // These tests never touch the network: every case below fails (or succeeds)
-// before any upstream fetch would be attempted.
+// before any upstream fetch would be attempted. The upstream fetch path
+// (redirects, pinning, deadlines, encoding) is covered by tests/integration.test.js
+// and tests/compress.test.js. Address-range boundaries: tests/address-policy.test.js.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -70,6 +72,11 @@ test("handler rejects literal private hosts before any fetch", async () => {
     "http://169.254.169.254/latest/meta-data",
     "http://100.64.0.1/x.png",
     "http://192.0.0.9/x.png", // IETF reserved range
+    "http://192.0.2.1/x.png", // TEST-NET-1
+    "http://198.51.100.1/x.png", // TEST-NET-2
+    "http://203.0.113.1/x.png", // TEST-NET-3
+    "http://[2001:db8::1]/x.png", // IPv6 documentation
+    "http://[::ffff:192.0.2.1]/x.png", // IPv4-mapped documentation address
     "http://[::1]/x.png",
     "http://[fd00::1]/x.png",
     "http://[fe80::1]/x.png",
@@ -175,6 +182,72 @@ test("resolveAndValidateRemoteUrl reports DNS failures as 502", async () => {
   setDnsLookupForTests(async () => { throw new Error("ENOTFOUND"); });
   try {
     const result = await resolveAndValidateRemoteUrl("http://nx.example.com/x.png");
+    assert.equal(result.valid, false);
+    assert.equal(result.error, DNS_RESOLUTION_ERROR);
+    assert.equal(result.statusCode, 502);
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+// --- shared-deadline behaviour of the DNS step (Finding 2) -------------------
+
+test("resolveAndValidateRemoteUrl rejects immediately when the signal is already aborted", async () => {
+  let lookups = 0;
+  setDnsLookupForTests(async () => { lookups += 1; return [{ address: "93.184.216.34", family: 4 }]; });
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      resolveAndValidateRemoteUrl("http://example.com/x.png", { signal: controller.signal }),
+      { name: "AbortError" },
+    );
+    assert.equal(lookups, 0, "no DNS query may start after the deadline");
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+test("resolveAndValidateRemoteUrl abandons a stalled lookup as soon as the signal fires", async () => {
+  setDnsLookupForTests(() => new Promise(() => {})); // never settles
+  try {
+    const controller = new AbortController();
+    const started = Date.now();
+    setTimeout(() => controller.abort(), 100);
+    await assert.rejects(
+      // The default DNS timeout is 2 s; the shared signal must win long before.
+      resolveAndValidateRemoteUrl("http://stalled.example.com/x.png", { signal: controller.signal }),
+      { name: "AbortError" },
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1000, `expected prompt abort, took ${elapsed} ms`);
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+test("resolveAndValidateRemoteUrl discards a lookup that completes after the deadline", async () => {
+  setDnsLookupForTests(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  try {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    await assert.rejects(
+      resolveAndValidateRemoteUrl("http://late.example.com/x.png", { signal: controller.signal }),
+      { name: "AbortError" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200)); // let the late answer arrive
+  } finally {
+    resetDnsLookupForTests();
+  }
+});
+
+test("resolveAndValidateRemoteUrl still honours its own DNS timeout without a signal", async () => {
+  setDnsLookupForTests(() => new Promise(() => {}));
+  try {
+    const result = await resolveAndValidateRemoteUrl("http://stalled.example.com/x.png", { timeoutMs: 60 });
     assert.equal(result.valid, false);
     assert.equal(result.error, DNS_RESOLUTION_ERROR);
     assert.equal(result.statusCode, 502);
