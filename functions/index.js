@@ -53,6 +53,25 @@ const BASE_HEADERS = {
   ...SECURITY_HEADERS,
 };
 
+// Runtime limits live in one frozen object so the integration tests can shrink
+// them (a 500 ms deadline instead of 8 s, a 2 KB output cap instead of 4.3 MB)
+// without touching the production defaults or exposing them to requests.
+// Nothing in the request path can modify this; only configureForTests() can.
+const DEFAULT_SETTINGS = Object.freeze({
+  fetchTimeoutMs: FETCH_TIMEOUT_MS,
+  maxImageBytes: MAX_IMAGE_BYTES,
+  maxOutputBytes: MAX_FUNCTION_OUTPUT_BYTES,
+  resolveRemoteUrl: resolveAndValidateRemoteUrl,
+});
+let settings = DEFAULT_SETTINGS;
+
+export function configureForTests(overrides = {}) {
+  settings = Object.freeze({ ...DEFAULT_SETTINGS, ...overrides });
+}
+export function resetConfigForTests() {
+  settings = DEFAULT_SETTINGS;
+}
+
 let sharpPromise;
 
 async function getSharp() {
@@ -196,8 +215,13 @@ function hasCredentials(normalized) {
 // esbuild bundling). The DNS pinning guarantees are identical: the pinned
 // lookup only ever answers with the addresses that
 // resolveAndValidateRemoteUrl already checked.
-function requestPinned(urlString, upstreamHeaders, lookup, signal) {
+function requestPinned(urlString, upstreamHeaders, lookup, signal, socketTimeoutMs) {
   return new Promise((resolve, reject) => {
+    // Never initiate a new upstream request once the shared deadline has fired.
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
     const target = new URL(urlString);
     const transport = target.protocol === "https:" ? https : http;
     const request = transport.get(target, {
@@ -213,7 +237,7 @@ function requestPinned(urlString, upstreamHeaders, lookup, signal) {
 
     // Socket inactivity timeout; resets on activity, so a slow-drip upstream
     // cannot stall forever even between bytes.
-    request.setTimeout(FETCH_TIMEOUT_MS, () => {
+    request.setTimeout(socketTimeoutMs, () => {
       request.destroy(Object.assign(
         new Error("Upstream socket timed out."),
         { name: "AbortError" },
@@ -233,9 +257,9 @@ function createHttpError(statusCode, message) {
   return error;
 }
 
-async function readLimitedBody(response) {
+async function readLimitedBody(response, maxBytes) {
   const contentLength = Number.parseInt(response.headers["content-length"] || "", 10);
-  if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     response.destroy();
     throw createHttpError(413, "The source image is too large.");
   }
@@ -244,7 +268,7 @@ async function readLimitedBody(response) {
   let total = 0;
   for await (const chunk of response) {
     total += chunk.length;
-    if (total > MAX_IMAGE_BYTES) {
+    if (total > maxBytes) {
       response.destroy();
       throw createHttpError(413, "The source image is too large.");
     }
@@ -253,7 +277,8 @@ async function readLimitedBody(response) {
   return Buffer.concat(chunks, total);
 }
 
-async function fetchImage(normalizedHeaders, initialUrl) {
+export async function fetchImage(normalizedHeaders, initialUrl) {
+  const { fetchTimeoutMs, maxImageBytes, resolveRemoteUrl } = settings;
   let currentUrl = initialUrl;
   // Forwarded request headers don't change across hops, except that
   // credentials are dropped when a redirect leaves the original origin.
@@ -261,22 +286,28 @@ async function fetchImage(normalizedHeaders, initialUrl) {
   const controller = new AbortController();
   // One deadline covers every hop AND the body download, so a slow-drip
   // upstream can't outlive the timeout once its headers have arrived.
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
 
   try {
     for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-      const validation = await resolveAndValidateRemoteUrl(currentUrl);
+      // The deadline is checked before every hop, and the DNS step observes the
+      // same signal, so a stalled resolver cannot outlive the 8 s budget or let
+      // a later hop start after it.
+      controller.signal.throwIfAborted();
+      const validation = await resolveRemoteUrl(currentUrl, { signal: controller.signal });
       if (!validation.valid) {
         const error = new Error(validation.error);
         error.statusCode = validation.statusCode || 403;
         throw error;
       }
 
+      controller.signal.throwIfAborted();
       const upstream = await requestPinned(
         validation.url,
         upstreamHeaders,
         createPinnedLookup(validation.addresses),
         controller.signal,
+        fetchTimeoutMs,
       );
 
       const location = upstream.headers.location;
@@ -327,7 +358,7 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       }
 
       return {
-        buffer: await readLimitedBody(upstream),
+        buffer: await readLimitedBody(upstream, maxImageBytes),
         contentType,
         headers: upstream.headers,
       };
@@ -405,28 +436,53 @@ async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
       }).toBuffer();
 }
 
-async function compressImage(input, useWebp, grayscale, quality, maxWidth) {
+// Fallback widths, widest first. The ladder deliberately continues far below
+// 320 px so that a small explicit max_width still has narrower sizes to try.
+const FALLBACK_WIDTH_LADDER = Object.freeze([
+  4096, 3072, 2048, 1600, 1280, 960, 640, 320, 240, 160, 120, 80, 64, 48, 32, 16,
+]);
+
+// Widths to try, in order, once lowering quality alone was not enough. Only
+// widths strictly below a requested max_width are used (the requested width
+// itself was already tried by the quality loop), so a request such as
+// max_width=100 or 320 still gets smaller sizes instead of an empty list.
+// Combined with `withoutEnlargement` at encode time this never enlarges an image.
+export function buildFallbackWidths(maxWidth) {
+  const ceiling = maxWidth > 0 ? maxWidth : Number.POSITIVE_INFINITY;
+  const widths = FALLBACK_WIDTH_LADDER.filter((width) => width < ceiling);
+  if (widths.length === 0) {
+    // max_width <= 16: halve down to 1 px rather than giving up.
+    for (let width = Math.floor(ceiling / 2); width >= 1; width = Math.floor(width / 2)) {
+      widths.push(width);
+    }
+  }
+  return widths;
+}
+
+export async function compressImage(
+  input,
+  useWebp,
+  grayscale,
+  quality,
+  maxWidth,
+  maxOutputBytes = settings.maxOutputBytes,
+) {
   let output = await encodeImage(input, useWebp, grayscale, quality, maxWidth);
-  if (output.length <= MAX_FUNCTION_OUTPUT_BYTES) return output;
+  if (output.length <= maxOutputBytes) return output;
 
   // Keep the requested settings as the first choice. Only enter this fallback
   // when Netlify's buffered-response ceiling would otherwise be exceeded.
   for (let q = quality - 10; q >= (useWebp ? 10 : 20); q -= 10) {
     output = await encodeImage(input, useWebp, grayscale, q, maxWidth);
-    if (output.length <= MAX_FUNCTION_OUTPUT_BYTES) return output;
+    if (output.length <= maxOutputBytes) return output;
   }
 
   // If quality alone is insufficient, progressively reduce dimensions. This
   // protects large images from producing a base64 response that Netlify will
   // reject while preserving the extension's normal max_width behaviour.
-  const requestedWidth = maxWidth > 0 ? maxWidth : 4096;
-  // Widths below the requested max_width are included too, otherwise a small
-  // requested limit (e.g. 800 px) would exhaust this list instantly and fail
-  // with 413 even though a narrower image could still fit the response cap.
-  for (const width of [requestedWidth, 3072, 2048, 1600, 1280, 960, 640, 320]) {
-    if (width <= 0 || (maxWidth > 0 && width >= maxWidth)) continue;
+  for (const width of buildFallbackWidths(maxWidth)) {
     output = await encodeImage(input, useWebp, grayscale, useWebp ? 30 : 45, width);
-    if (output.length <= MAX_FUNCTION_OUTPUT_BYTES) return output;
+    if (output.length <= maxOutputBytes) return output;
   }
 
   const error = new Error("The optimized image is too large for the proxy response limit.");
@@ -469,7 +525,7 @@ async function getDetectedImageContentType(buffer) {
 // limit and fail as an opaque gateway error, so report a clear 413 instead.
 function createOriginalResponse(source, contentType, cacheHeaders) {
   const size = source.buffer.length;
-  if (size > MAX_FUNCTION_OUTPUT_BYTES) {
+  if (size > settings.maxOutputBytes) {
     throw createHttpError(413, "The source image is too large to return unmodified.");
   }
   return createBinaryResponse(
