@@ -1,22 +1,40 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
 import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
 
-const HEADERS = {
-  "content-type": "application/json; charset=utf-8",
-  "cache-control": "no-store",
+// Same response-building pattern as functions/index.js: shared CORS and
+// security headers come from util/headers.js exactly once, so a future header
+// addition cannot be missed in one handler.
+const BASE_HEADERS = {
   ...CORS_HEADERS,
   ...SECURITY_HEADERS,
 };
 
+const HEALTH_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store",
+};
+
+function createResponse(statusCode, body = "", headers = {}) {
+  return {
+    statusCode,
+    headers: { ...BASE_HEADERS, ...headers },
+    body,
+  };
+}
+
 export async function handler(event = {}) {
   const method = event.httpMethod || "GET";
-  if (method === "OPTIONS") return { statusCode: 204, headers: HEADERS, body: "" };
+  if (method === "OPTIONS") {
+    return createResponse(204, "", { "cache-control": "no-store" });
+  }
   if (method !== "GET") {
-    return {
-      statusCode: 405,
-      headers: { ...HEADERS, allow: "GET, OPTIONS" },
-      body: JSON.stringify({ error: "Method Not Allowed" }),
-    };
+    // Error responses are plain text per docs/backend-contract.md, matching
+    // the main proxy handler instead of returning a JSON body here.
+    return createResponse(405, "Method Not Allowed", {
+      allow: "GET, OPTIONS",
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+    });
   }
 
   let sharpStatus = { available: false };
@@ -35,10 +53,9 @@ export async function handler(event = {}) {
     };
   }
 
-  return {
-    statusCode: 200,
-    headers: HEADERS,
-    body: JSON.stringify({
+  return createResponse(
+    200,
+    JSON.stringify({
       status: "ok",
       service: "bandwidth-hero-proxy",
       version: PROXY_VERSION,
@@ -46,5 +63,6 @@ export async function handler(event = {}) {
       sharp: sharpStatus,
       features: FEATURES,
     }),
-  };
+    HEALTH_HEADERS,
+  );
 }

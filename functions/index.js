@@ -142,6 +142,10 @@ function getImageUrl(value) {
     const parsed = JSON.parse(value);
     if (Array.isArray(parsed)) return parsed.join("&url=");
     if (typeof parsed === "string") return parsed;
+    // Valid JSON that is neither a string nor an array (number, boolean,
+    // null) can never be an HTTP URL, but falling through to String(value)
+    // keeps the original text so parseHttpUrl rejects it with a proper 400
+    // instead of this branch silently inventing a different value.
   } catch {
     // Normal query-string URL.
   }
