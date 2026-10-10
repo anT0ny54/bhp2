@@ -104,7 +104,7 @@ function expandIpv6(value) {
 }
 
 function isPrivateIpv6(value) {
-  const groups = expandIpv6(value.toLowerCase());
+  const groups = expandIpv6(value);
   if (!groups || groups.length !== 8) return true;
   const toIpv4 = (high, low) => [high >>> 8, high & 255, low >>> 8, low & 255].join(".");
 
@@ -151,7 +151,11 @@ export function parseHttpUrl(value) {
   } catch { return null; }
 }
 
-export function validateRemoteUrl(value) {
+// Internal building block of resolveAndValidateRemoteUrl(). Not exported:
+// the pre-fetch check in functions/index.js uses parseHttpUrl + isPrivateHost
+// directly, so an exported copy here would be a dead public API that can drift
+// from the DNS-validated path.
+function validateRemoteUrl(value) {
   const url = parseHttpUrl(value);
   if (!url) return { valid: false, error: INVALID_URL_ERROR, statusCode: 400 };
   if (isPrivateHost(url.hostname)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
