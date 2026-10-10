@@ -7,13 +7,13 @@
   "scripts": {
     "start": "netlify dev",
     "dev": "netlify dev --offline",
-    "build": "npm run validate",
+    "build": "yarn run validate",
     "validate": "node --check functions/index.js && node --check functions/health.js && node --check util/validate.js && node --check util/headers.js && node --check util/version.js && node --check site.js && node --check tests/index.test.js && node --check tests/health.test.js && node --check tests/address-policy.test.js && node --check tests/compress.test.js && node --check tests/integration.test.js",
     "test": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js tests/compress.test.js tests/integration.test.js",
     "test:fast": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js",
     "test:integration": "node --test tests/compress.test.js tests/integration.test.js",
-    "check": "npm run validate && npm test",
-    "ci": "npm run check"
+    "check": "yarn run validate && yarn test",
+    "ci": "yarn run check"
   },
   "dependencies": {
     "sharp": "0.35.5"
