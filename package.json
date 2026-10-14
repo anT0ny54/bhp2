@@ -19,7 +19,7 @@
     "sharp": "0.35.5"
   },
   "devDependencies": {
-    "netlify-cli": "27.10.2"
+    "netlify-cli": "27.12.0"
   },
   "engines": {
     "node": ">=22.13.0"
