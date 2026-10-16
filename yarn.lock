@@ -4741,10 +4741,10 @@ negotiator@^1.0.0:
   dependencies:
     content-type "^2.1.0"
 
-netlify-cli@27.12.0:
-  version "27.12.0"
-  resolved "https://registry.yarnpkg.com/netlify-cli/-/netlify-cli-27.12.0.tgz#c223fbfaa03b72cc3fa605af1b0eb8b127f7076e"
-  integrity sha512-FvfVyxmRpMUhU1zbvaZrhNaGefipHb2liUTc0yWb/znPKhChiKoxGF0lsUCgZuWvFV8TeNaB27iIkE0vOU0ADA==
+netlify-cli@27.12.1:
+  version "27.12.1"
+  resolved "https://registry.yarnpkg.com/netlify-cli/-/netlify-cli-27.12.1.tgz#f15c3e616b8add4e061280fbe83fd50cea9f794c"
+  integrity sha512-Pd9aNEWdstTxFkvBS92CoJVSEGQdOKI73dudjbouuwgasPoaBA2UHYsGyah0aW+y7EY9L/ugtoZwXhcKvI+AhQ==
   dependencies:
     "@fastify/static" "^10.0.0"
     "@inquirer/prompts" "^8.7.2"
