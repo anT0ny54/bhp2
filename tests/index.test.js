@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { handler, buildFallbackWidths, getFallbackQuality, parseInteger } from "../functions/index.js";
+import { handler, buildFallbackWidths, getFallbackQuality, getImageUrl, parseInteger } from "../functions/index.js";
 import { INVALID_URL_ERROR, PRIVATE_HOST_ERROR } from "../util/validate.js";
 import { BASE_HEADERS } from "../util/headers.js";
 
@@ -81,4 +81,36 @@ test("buildFallbackWidths only narrows below the requested width", () => {
   assert.deepEqual(buildFallbackWidths(320), [240, 160, 120, 80, 64, 48, 32, 16]);
   assert.deepEqual(buildFallbackWidths(16), [8, 4, 2, 1]);
   assert.ok(all.every((width) => width > 0));
+});
+
+test("getImageUrl decodes encoded URLs once and stops at the next parameter", () => {
+  const image = "https://cdn.example/a.jpg?w=400&h=300";
+  assert.deepEqual(
+    getImageUrl({ rawQuery: `url=${encodeURIComponent(image)}&jpeg=0&bw=1&quality=60&extra=1` }),
+    { url: image, legacy: false },
+  );
+  // Parameter order does not matter.
+  assert.deepEqual(
+    getImageUrl({ rawQuery: `jpeg=0&url=${encodeURIComponent(image)}&quality=60` }),
+    { url: image, legacy: false },
+  );
+});
+
+test("getImageUrl rebuilds legacy unencoded URLs up to the first proxy parameter", () => {
+  assert.deepEqual(
+    getImageUrl({ rawQuery: "url=http://cdn.example/a.jpg?w=400&h=300&jpeg=1&l=40" }),
+    { url: "http://cdn.example/a.jpg?w=400&h=300", legacy: true },
+  );
+  // A legacy URL without its own "&" needs no special cache handling.
+  assert.deepEqual(
+    getImageUrl({ rawQuery: "url=http://cdn.example/a.jpg?w=400&bw=1" }),
+    { url: "http://cdn.example/a.jpg?w=400", legacy: false },
+  );
+});
+
+test("getImageUrl falls back to the parsed parameter and handles absence", () => {
+  assert.deepEqual(getImageUrl({ queryStringParameters: { url: "https://a.example/x.png" } }),
+    { url: "https://a.example/x.png", legacy: false });
+  assert.deepEqual(getImageUrl({ rawQuery: "", queryStringParameters: {} }), { url: "", legacy: false });
+  assert.deepEqual(getImageUrl({ rawQuery: "url=&jpeg=1" }), { url: "", legacy: false });
 });

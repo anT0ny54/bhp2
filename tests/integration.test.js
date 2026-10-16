@@ -1,6 +1,8 @@
 // End-to-end handler tests against a loopback upstream. The stubbed
-// resolveRemoteUrl pins every request to 127.0.0.1 (the real DNS/SSRF policy
+// resolveRemoteUrl pins every hostname to 127.0.0.1 (the real DNS/SSRF policy
 // is covered by tests/address-policy.test.js), so no external network is used.
+// Different hostnames (proxy.test, other.test) give different origins on the
+// same loopback server, which the redirect tests rely on.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -11,6 +13,8 @@ import { handler, configureForTests, resetConfigForTests } from "../functions/in
 
 let server;
 let baseUrl;
+let otherOriginUrl;
+let port;
 let routes;
 
 function png(width, height) {
@@ -28,10 +32,12 @@ before(async () => {
       res.end("not found");
       return;
     }
-    route(res);
+    route(res, req);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  baseUrl = `http://proxy.test:${server.address().port}`;
+  port = server.address().port;
+  baseUrl = `http://proxy.test:${port}`;
+  otherOriginUrl = `http://other.test:${port}`;
 
   configureForTests({
     fetchTimeoutMs: 2_000,
@@ -49,8 +55,22 @@ after(async () => {
   server.close();
 });
 
-function event(url, extraQuery = {}) {
-  return { httpMethod: "GET", queryStringParameters: { url, ...extraQuery } };
+function event(url, extraQuery = {}, headers = {}) {
+  return { httpMethod: "GET", queryStringParameters: { url, ...extraQuery }, headers };
+}
+
+function serve(path, body, contentType = "image/png") {
+  routes.set(path, (res) => {
+    res.writeHead(200, { "content-type": contentType });
+    res.end(body);
+  });
+}
+
+// Already-small JPEG of noise: re-encoding it as WebP q60 is larger.
+function tinyJpeg() {
+  return sharp(crypto.randomBytes(160 * 120 * 3), { raw: { width: 160, height: 120, channels: 3 } })
+    .jpeg({ quality: 2 })
+    .toBuffer();
 }
 
 test("jpeg=1 flattens transparency onto white, not black", async () => {
@@ -167,4 +187,144 @@ test("web requests return webp with telemetry headers", async () => {
   assert.equal(response.headers["content-type"], "image/webp");
   assert.equal(response.headers["x-bh-original-size"], String(input.length));
   assert.ok(Number(response.headers["x-bh-bytes-saved"]) >= 0);
+});
+
+test("a body that stalls mid-download surfaces as 504 via the socket timer", async () => {
+  // Deadline far away, socket inactivity timer short: only the socket timer
+  // can end this request. It used to be reported as 502 ECONNRESET.
+  configureForTests({ fetchTimeoutMs: 3_000, socketTimeoutMs: 200 });
+  try {
+    routes.set("/drip.png", (res) => {
+      res.writeHead(200, { "content-type": "image/png" });
+      res.write(Buffer.alloc(16));
+    });
+    const started = Date.now();
+    const response = await handler(event(`${baseUrl}/drip.png`));
+    assert.equal(response.statusCode, 504, response.body);
+    assert.ok(Date.now() - started < 2_000, "the socket timer, not the deadline, must end it");
+  } finally {
+    configureForTests({ fetchTimeoutMs: 2_000, socketTimeoutMs: 5_000 });
+  }
+});
+
+test("jpeg=true selects JPEG like jpeg=1; anything else stays WebP", async () => {
+  serve("/flags.png", await png(64, 48));
+  for (const [jpeg, type] of [["true", "image/jpeg"], ["1", "image/jpeg"], ["0", "image/webp"], [undefined, "image/webp"]]) {
+    const query = jpeg === undefined ? {} : { jpeg };
+    const response = await handler(event(`${baseUrl}/flags.png`, query));
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.headers["content-type"], type, `jpeg=${jpeg}`);
+  }
+});
+
+test("legacy unencoded URLs keep their own query string and vary on the full query", async () => {
+  let requested = "";
+  routes.set("/legacy.png?w=1&h=2", (res, req) => {
+    requested = req.url;
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(input);
+  });
+  const input = await png(40, 30);
+  const response = await handler({
+    httpMethod: "GET",
+    // What Netlify delivers for ?url=http://.../legacy.png?w=1&h=2&jpeg=0&quality=50
+    rawQuery: `url=${baseUrl}/legacy.png?w=1&h=2&jpeg=0&quality=50`,
+    queryStringParameters: { url: `${baseUrl}/legacy.png?w=1`, h: "2", jpeg: "0", quality: "50" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(requested, "/legacy.png?w=1&h=2");
+  assert.equal(response.headers["netlify-vary"], "query");
+});
+
+test("encoded URLs (Bandwidth Guardian) are decoded once from the raw query", async () => {
+  serve("/enc.png?a=1&b=2", await png(40, 30));
+  const imageUrl = `${baseUrl}/enc.png?a=1&b=2`;
+  const response = await handler({
+    httpMethod: "GET",
+    rawQuery: `url=${encodeURIComponent(imageUrl)}&jpeg=0&bw=1&quality=40&max_width=768`,
+    queryStringParameters: { url: imageUrl, jpeg: "0", bw: "1", quality: "40", max_width: "768" },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers["content-type"], "image/webp");
+  assert.equal(response.headers["netlify-vary"], "query=url|quality|bw|jpeg|max_width|l");
+});
+
+test("upstream gets a fixed Accept header and never the client's Cookie", async () => {
+  let seen;
+  routes.set("/headers.png", (res, req) => {
+    seen = req.headers;
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(input);
+  });
+  const input = await png(20, 20);
+  const response = await handler(event(`${baseUrl}/headers.png`, {}, {
+    Accept: "image/jxl,*/*",
+    Cookie: "session=proxy-origin-secret",
+    Referer: "https://news.example/",
+  }));
+  assert.equal(response.statusCode, 200, response.body);
+  assert.doesNotMatch(seen.accept, /jxl/);
+  assert.match(seen.accept, /^image\/webp/);
+  assert.equal(seen.cookie, undefined);
+  assert.equal(seen.referer, "https://news.example/");
+  // Nothing request-specific reaches upstream, so the result stays CDN-cacheable.
+  assert.match(response.headers["cache-control"], /^public,/);
+});
+
+test("Referer is kept on same-origin redirects and stripped on cross-origin ones", async () => {
+  const input = await png(20, 20);
+  const seen = {};
+  routes.set("/hop-same.png", (res) => { res.writeHead(302, { location: "/hop-final-same.png" }); res.end(); });
+  routes.set("/hop-cross.png", (res) => { res.writeHead(302, { location: `${otherOriginUrl}/hop-final-cross.png` }); res.end(); });
+  for (const name of ["same", "cross"]) {
+    routes.set(`/hop-final-${name}.png`, (res, req) => {
+      seen[name] = req.headers.referer;
+      res.writeHead(200, { "content-type": "image/png" });
+      res.end(input);
+    });
+  }
+  const headers = { referer: "https://news.example/" };
+  assert.equal((await handler(event(`${baseUrl}/hop-same.png`, {}, headers))).statusCode, 200);
+  assert.equal((await handler(event(`${baseUrl}/hop-cross.png`, {}, headers))).statusCode, 200);
+  assert.equal(seen.same, "https://news.example/");
+  assert.equal(seen.cross, undefined);
+});
+
+test("more than 5 redirects return 508", async () => {
+  for (let i = 0; i < 7; i += 1) {
+    routes.set(`/loop-${i}.png`, (res) => { res.writeHead(302, { location: `/loop-${i + 1}.png` }); res.end(); });
+  }
+  const response = await handler(event(`${baseUrl}/loop-0.png`));
+  assert.equal(response.statusCode, 508, response.body);
+});
+
+test("WebP never-enlarge returns browser-safe originals with their detected type", async () => {
+  const jpeg = await tinyJpeg();
+  // Wrong upstream Content-Type on purpose: the detected type must win.
+  serve("/small.jpg", jpeg, "image/png");
+  const response = await handler(event(`${baseUrl}/small.jpg`));
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers["content-type"], "image/jpeg");
+  assert.equal(Buffer.from(response.body, "base64").equals(jpeg), true);
+});
+
+test("non-browser formats are always served as WebP, even when larger", async () => {
+  const tiff = await sharp(crypto.randomBytes(160 * 120 * 3), { raw: { width: 160, height: 120, channels: 3 } })
+    .tiff({ compression: "jpeg", quality: 2 })
+    .toBuffer();
+  serve("/small.tiff", tiff, "image/tiff");
+  const response = await handler(event(`${baseUrl}/small.tiff`));
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers["content-type"], "image/webp");
+});
+
+test("source above the input size limit returns 413", async () => {
+  configureForTests({ maxImageBytes: 1_000 });
+  try {
+    serve("/huge.png", await png(200, 200));
+    const response = await handler(event(`${baseUrl}/huge.png`));
+    assert.equal(response.statusCode, 413, response.body);
+  } finally {
+    configureForTests({ maxImageBytes: 15 * 1024 * 1024 });
+  }
 });

@@ -160,3 +160,37 @@ test("compressImage rejects undecodable input without a bogus HTTP status", asyn
     (error) => !Number.isInteger(error.statusCode),
   );
 });
+
+// Counts real Sharp encodes so the fallback's cost stays bounded.
+async function countEncodes(run) {
+  const original = sharp.prototype.toBuffer;
+  let count = 0;
+  sharp.prototype.toBuffer = function countedToBuffer(...args) {
+    count += 1;
+    return original.apply(this, args);
+  };
+  try {
+    return { result: await run().catch((error) => error), count };
+  } finally {
+    sharp.prototype.toBuffer = original;
+  }
+}
+
+test("compressImage fallback uses at most 6 encodes, even on the 413 path", async () => {
+  const input = await noisePng(1200, 900);
+  const fit = await countEncodes(() => compressImage(input, true, false, 60, 0, 40_000));
+  assert.ok(Buffer.isBuffer(fit.result), String(fit.result?.message));
+  assert.ok(fit.count <= 6, `fit path used ${fit.count} encodes`);
+
+  const fail = await countEncodes(() => compressImage(input, true, false, 60, 0, 10));
+  assert.equal(fail.result.statusCode, 413);
+  assert.ok(fail.count <= 6, `413 path used ${fail.count} encodes (was 22)`);
+});
+
+test("compressImage stops with 504 once the request budget is spent", async () => {
+  const input = await noisePng(600, 400);
+  await assert.rejects(
+    compressImage(input, true, false, 60, 0, 1_000, { deadline: Date.now() - 1 }),
+    (error) => error.statusCode === 504 && /time budget/i.test(error.message),
+  );
+});
