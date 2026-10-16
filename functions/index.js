@@ -721,10 +721,12 @@ export async function handler(event = {}) {
       maxWidth,
     );
 
-    if (compressed.length >= originalSize) {
-      // Never make a client pay for a larger representation. Preserve the
-      // original bytes AND a real media type. Some CDNs omit Content-Type, so
-      // detect the format only on this uncommon fallback path.
+    if (useWebp && compressed.length >= originalSize) {
+      // For WebP requests, never make a client pay for a larger representation:
+      // preserve the original bytes AND a real media type. Explicit jpeg=1 is a
+      // format request, so honor it for static images even when JPEG is larger
+      // than the source. Some CDNs omit Content-Type, so detect the format only
+      // on this uncommon WebP fallback path.
       const originalContentType =
         source.contentType || await getDetectedImageContentType(source.buffer);
       return createOriginalResponse(source, originalContentType, cacheHeaders);
