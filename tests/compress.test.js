@@ -9,7 +9,7 @@ import sharp from "sharp";
 import { buildFallbackWidths, compressImage } from "../functions/index.js";
 
 // Incompressible RGB noise: output size is predictable and always large, so a
-// small cap reliably pushes compressImage past the quality loop.
+// small cap reliably pushes compressImage past the fallback-quality encode.
 async function noisePng(width, height) {
   return sharp(crypto.randomBytes(width * height * 3), {
     raw: { width, height, channels: 3 },
@@ -31,13 +31,15 @@ async function detailedPng(detailWidth) {
     .toBuffer();
 }
 
-// Mirrors encodeImage()'s WebP options at the lowest quality the quality loop
-// will try, so the test can pick a cap the *requested* width cannot meet.
+// Mirrors encodeImage()'s static WebP options (effort 4, smartSubsample; no
+// minSize, and mixed only for animations) at the codec quality floor, which is
+// below any fallback quality, so the test can pick a cap the *requested* width
+// cannot meet.
 async function lowestQualityWebpSize(input, width) {
   const out = await sharp(input)
     .rotate()
     .resize({ width, fit: "inside", withoutEnlargement: true })
-    .webp({ quality: 10, effort: 4, smartSubsample: true, minSize: true, mixed: true })
+    .webp({ quality: 10, effort: 4, smartSubsample: true })
     .toBuffer();
   return out.length;
 }
@@ -193,4 +195,13 @@ test("compressImage stops with 504 once the request budget is spent", async () =
     compressImage(input, true, false, 60, 0, 1_000, { deadline: Date.now() - 1 }),
     (error) => error.statusCode === 504 && /time budget/i.test(error.message),
   );
+});
+
+test("truncated JPEGs still decode (failOn: none) instead of failing with 500", async () => {
+  const jpeg = await sharp(crypto.randomBytes(320 * 240 * 3), { raw: { width: 320, height: 240, channels: 3 } })
+    .jpeg({ quality: 80 })
+    .toBuffer();
+  const truncated = jpeg.subarray(0, Math.floor(jpeg.length * 0.8));
+  const output = await compressImage(truncated, true, false, 60, 0, 4_300_000);
+  assert.equal((await sharp(output).metadata()).format, "webp");
 });

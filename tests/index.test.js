@@ -4,7 +4,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { handler, buildFallbackWidths, getFallbackQuality, getImageUrl, parseInteger } from "../functions/index.js";
+import {
+  handler,
+  buildFallbackWidths,
+  getFallbackQuality,
+  getImageUrl,
+  normalizeImageUrl,
+  originalSatisfiesRequest,
+  parseInteger,
+} from "../functions/index.js";
 import { INVALID_URL_ERROR, PRIVATE_HOST_ERROR } from "../util/validate.js";
 import { BASE_HEADERS } from "../util/headers.js";
 
@@ -40,6 +48,8 @@ test("private hosts are rejected with 403 (not 400) before any fetch", async () 
     "http://192.168.1.1/a.png",
     "http://169.254.169.254/latest/meta-data/",
     "http://localhost/a.png",
+    "http://img.localhost/a.png",
+    "http://a.b.localhost./a.png",
     "http://[::1]/a.png",
     "http://[::ffff:10.0.0.1]/a.png",
   ]) {
@@ -63,6 +73,10 @@ test("integer query parsing rejects partial numbers and clamps valid integers", 
   assert.equal(parseInteger("0", 60, 1, 100), 1);
   assert.equal(parseInteger("-5", 60, 1, 100), 1);
   assert.equal(parseInteger("9000", 0, 0, 8192), 8192);
+  // Digit strings too long for a finite number still clamp instead of
+  // being mistaken for malformed input.
+  assert.equal(parseInteger("9".repeat(400), 0, 0, 8192), 8192);
+  assert.equal(parseInteger(`-${"9".repeat(400)}`, 60, 1, 100), 1);
 });
 
 test("fallback quality never exceeds a low requested quality", () => {
@@ -113,4 +127,36 @@ test("getImageUrl falls back to the parsed parameter and handles absence", () =>
     { url: "https://a.example/x.png", legacy: false });
   assert.deepEqual(getImageUrl({ rawQuery: "", queryStringParameters: {} }), { url: "", legacy: false });
   assert.deepEqual(getImageUrl({ rawQuery: "url=&jpeg=1" }), { url: "", legacy: false });
+});
+
+test("normalizeImageUrl unwraps the legacy 1.1.x.x/bmi/ carrier prefix and drops fragments", () => {
+  assert.equal(normalizeImageUrl("http://1.1.1.1/bmi/https://cdn.example/a.jpg"), "https://cdn.example/a.jpg");
+  assert.equal(normalizeImageUrl("http://1.1.22.33/bmi/cdn.example/a.jpg"), "http://cdn.example/a.jpg");
+  assert.equal(normalizeImageUrl(" https://cdn.example/a.jpg?x=1#frag "), "https://cdn.example/a.jpg?x=1");
+  assert.equal(normalizeImageUrl("not a url"), "not a url");
+});
+
+test("the original may replace WebP output only when it satisfies bw and max_width", () => {
+  const color = { width: 600, channels: 3, space: "srgb" };
+  assert.equal(originalSatisfiesRequest(color, { grayscale: false, maxWidth: 0 }), true);
+  assert.equal(originalSatisfiesRequest(color, { grayscale: false, maxWidth: 600 }), true);
+  assert.equal(originalSatisfiesRequest(color, { grayscale: false, maxWidth: 599 }), false);
+  assert.equal(originalSatisfiesRequest(color, { grayscale: true, maxWidth: 0 }), false);
+  assert.equal(originalSatisfiesRequest({ width: 600, channels: 1, space: "b-w" }, { grayscale: true, maxWidth: 768 }), true);
+  assert.equal(originalSatisfiesRequest({ channels: 3 }, { grayscale: false, maxWidth: 768 }), false);
+});
+
+test("the original's width is the displayed width: EXIF orientation and animated frames", () => {
+  const limit = { grayscale: false, maxWidth: 400 };
+  // Stored 300x600 with orientation 6 displays 600 px wide, over the limit.
+  assert.equal(originalSatisfiesRequest({ width: 300, height: 600, orientation: 6, channels: 3 }, limit), false);
+  // Stored 600x300 with orientation 8 displays 300 px wide, within it.
+  assert.equal(originalSatisfiesRequest({ width: 600, height: 300, orientation: 8, channels: 3 }, limit), true);
+  // Orientations 1-4 keep the stored axes.
+  assert.equal(originalSatisfiesRequest({ width: 300, height: 600, orientation: 3, channels: 3 }, limit), true);
+  // Rotated multi-frame input: one frame (pageHeight), not the stacked height.
+  assert.equal(
+    originalSatisfiesRequest({ width: 32, height: 96, pageHeight: 32, orientation: 8, channels: 3 }, { grayscale: false, maxWidth: 40 }),
+    true,
+  );
 });

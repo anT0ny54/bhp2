@@ -1,7 +1,7 @@
 // Health-endpoint tests (network-free; sharp is a local dependency).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 import { handler } from "../functions/health.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
@@ -43,4 +43,21 @@ test("non-GET methods are rejected with 405", async () => {
 test("OPTIONS is answered with 204", async () => {
   const response = await handler({ httpMethod: "OPTIONS" });
   assert.equal(response.statusCode, 204);
+});
+
+// package.json lists test files explicitly, so a new *.test.js that is not added
+// to the scripts would silently never run in CI.
+test("every test file is wired into the package.json test scripts", () => {
+  const files = readdirSync(new URL("../tests/", import.meta.url))
+    .filter((name) => name.endsWith(".test.js"))
+    .map((name) => `tests/${name}`)
+    .sort();
+  const listed = (script) => new Set(packageJson.scripts[script].split(/\s+/).filter((part) => part.endsWith(".test.js")));
+  const all = listed("test");
+  const fast = listed("test:fast");
+  const integration = listed("test:integration");
+  assert.deepEqual([...all].sort(), files, '"test" must list exactly the files in tests/');
+  for (const file of files) {
+    assert.notEqual(fast.has(file), integration.has(file), `${file} must be in exactly one of test:fast / test:integration`);
+  }
 });
