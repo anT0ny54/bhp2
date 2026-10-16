@@ -1,5 +1,6 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
 import { createResponse } from "../util/headers.js";
+import { loadSharp } from "../util/sharp.js";
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -20,8 +21,7 @@ export async function handler(event = {}) {
 
   let sharpStatus;
   try {
-    const module = await import("sharp");
-    const sharp = module.default || module;
+    const sharp = await loadSharp();
     sharpStatus = {
       available: true,
       version: sharp.versions?.sharp || "unknown",

@@ -4,6 +4,7 @@ import https from "node:https";
 import { resolveAndValidateRemoteUrl, createPinnedLookup } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
 import { BASE_HEADERS, createResponse } from "../util/headers.js";
+import { loadSharp } from "../util/sharp.js";
 
 // Sharp's metadata().format values mapped to real media types. AVIF and HEIC
 // are both reported as "heif" and told apart by metadata().compression (see
@@ -33,8 +34,9 @@ const FETCH_TIMEOUT_MS = 8_000;
 const SOCKET_INACTIVITY_TIMEOUT_MS = 5_000;
 const MAX_REDIRECTS = 5;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
-// Conservative default for serverless memory headroom; raise only after load testing.
-const MAX_INPUT_PIXELS = 24_000_000;
+// Conservative default for serverless memory headroom; raise only after load
+// testing. For multi-frame input Sharp counts the pixels of all frames together.
+const MAX_INPUT_PIXELS = 6_000_000;
 // Sharp disables its own processing timeout by default. Bound each libvips
 // pipeline so a stalled decode/encode can be mapped to an actionable 504.
 const SHARP_PROCESSING_TIMEOUT_SECONDS = 8;
@@ -59,12 +61,17 @@ const UNDERSHOOT_RATIO = 0.25;
 // Accept must not hand one client's format (e.g. JPEG XL) to everyone else.
 // Re-encoded output is unaffected; this only matters for original bytes.
 const UPSTREAM_ACCEPT = "image/webp,image/avif,image/apng,image/png,image/jpeg,image/gif;q=0.9,image/*;q=0.8,*/*;q=0.5";
-const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36";
+// User-Agent and Accept-Language are fixed for the same reason as Accept: the
+// response is cached by query only, so a CDN that varies on them (mobile or
+// low-res variants, localized images) must not have one client's variant
+// cached for everyone.
+const UPSTREAM_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+const UPSTREAM_ACCEPT_LANGUAGE = "en-US,en;q=0.9";
 // Pass-through request headers. Cookie is deliberately NOT forwarded: a
 // browser only sends the proxy origin's own cookies here, and forwarding them
-// to arbitrary upstream hosts would leak them. Referer is stripped on
-// cross-origin redirects.
+// to arbitrary upstream hosts would leak them. Referer is kept for hotlink
+// protection and stripped on cross-origin redirects.
 const FORWARDED_REQUEST_HEADERS = ["dnt", "referer"];
 
 // Browser cache is deliberately short-lived because extension settings are
@@ -112,22 +119,10 @@ export function resetConfigForTests() {
   settings = DEFAULT_SETTINGS;
 }
 
-let sharpPromise;
-
 async function getSharp() {
-  if (!sharpPromise) {
-    sharpPromise = import("sharp").then((module) => {
-      const sharp = module.default || module;
-      // Favor predictable memory use on small serverless instances. This limits
-      // libvips threads per image; it does not limit concurrent invocations.
-      sharp.concurrency(1);
-      return sharp;
-    });
-  }
   try {
-    return await sharpPromise;
+    return await loadSharp();
   } catch (error) {
-    sharpPromise = undefined;
     const wrapped = createHttpError(503, "Image processor is unavailable on the Netlify runtime.");
     wrapped.cause = error;
     throw wrapped;
@@ -195,7 +190,9 @@ export function getImageUrl(event = {}) {
   }
 }
 
-function normalizeImageUrl(value) {
+// Exported for tests. The 1.1.x.x/bmi/ prefix is a legacy carrier-proxy
+// (Bandwidth Hero era) URL wrapper that is unwrapped for compatibility.
+export function normalizeImageUrl(value) {
   const raw = value
     .trim()
     .replace(/^http:\/\/1\.1\.\d+\.\d+\/bmi\/(https?:\/\/)?/i, (_, scheme) => scheme || "http://");
@@ -219,7 +216,9 @@ export function parseInteger(value, fallback, min, max) {
   // before applying the documented default/clamp behavior.
   if (!/^[+-]?\d+$/.test(text)) return fallback;
   const n = Number.parseInt(text, 10);
-  return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
+  // The pattern above guarantees digits only; a string too long for a finite
+  // number parses to +/-Infinity, which the clamp turns into max/min.
+  return Math.min(Math.max(n, min), max);
 }
 
 function parseBoolean(value) {
@@ -236,8 +235,8 @@ function buildUpstreamHeaders(eventHeaders) {
   const headers = {
     accept: UPSTREAM_ACCEPT,
     "accept-encoding": "identity",
-    "user-agent": incoming["user-agent"] || DEFAULT_USER_AGENT,
-    "accept-language": incoming["accept-language"] || "en-US,en;q=0.9",
+    "user-agent": UPSTREAM_USER_AGENT,
+    "accept-language": UPSTREAM_ACCEPT_LANGUAGE,
   };
   for (const name of FORWARDED_REQUEST_HEADERS) {
     if (incoming[name]) headers[name] = incoming[name];
@@ -376,8 +375,8 @@ async function fetchImage(eventHeaders, initialUrl) {
         if (redirect === MAX_REDIRECTS) throw createHttpError(508, "Too many upstream redirects.");
         const next = resolveRedirect(location, target);
         if (next.origin !== target.origin) {
-          const { referer, ...withoutReferer } = upstreamHeaders;
-          upstreamHeaders = withoutReferer;
+          upstreamHeaders = { ...upstreamHeaders };
+          delete upstreamHeaders.referer;
         }
         currentUrl = next.toString();
         continue;
@@ -452,15 +451,35 @@ async function createSharpPipeline(input, animated) {
   const sharp = await getSharp();
   return sharp(input, {
     animated,
-    failOn: "warning",
+    // "none" instead of Sharp's default "warning": truncated or slightly
+    // corrupt JPEGs are common on real sites, and libvips treats truncation as
+    // an error at every stricter level. Rejecting them made the client fall
+    // back to downloading the full original, saving nothing. The pixel limit
+    // and processing timeout below still apply; non-images still fail.
+    failOn: "none",
     limitInputPixels: MAX_INPUT_PIXELS,
   }).timeout({ seconds: SHARP_PROCESSING_TIMEOUT_SECONDS });
 }
 
 // Header-only probe, done once per request. Its result drives the animated
 // passthrough, the original-bytes media type and the WebP encoder options.
+// It also runs the pixel-limit check before any decode, with the same options
+// the encoders use. Sharp reports an oversized input as a plain Error; that is
+// the client's input being too large (413), not a server failure (500).
 async function probeImage(buffer) {
-  return (await createSharpPipeline(buffer, true)).metadata();
+  try {
+    return await (await createSharpPipeline(buffer, true)).metadata();
+  } catch (error) {
+    if (/exceeds pixel limit/i.test(String(error?.message || ""))) {
+      const tooLarge = createHttpError(
+        413,
+        `The source image exceeds the ${MAX_INPUT_PIXELS / 1_000_000} MP decoding limit.`,
+      );
+      tooLarge.cause = error;
+      throw tooLarge;
+    }
+    throw error;
+  }
 }
 
 function getDetectedContentType(metadata) {
@@ -529,14 +548,11 @@ export function buildFallbackWidths(maxWidth) {
   return widths;
 }
 
-// Codec-specific floor for the fallback quality. It prevents pointless
-// near-zero-quality encodes but never raises a low requested quality.
-function getQualityFloor(useWebp) {
-  return useWebp ? 10 : 20;
-}
-
+// The codec-specific floor (WebP 10, JPEG 20) prevents pointless near-zero-
+// quality encodes but never raises a low requested quality.
 export function getFallbackQuality(quality, useWebp) {
-  return Math.min(quality, Math.max(getQualityFloor(useWebp), Math.floor(quality / 2)));
+  const floor = useWebp ? 10 : 20;
+  return Math.min(quality, Math.max(floor, Math.floor(quality / 2)));
 }
 
 // Encodes with the requested settings first. Only when Netlify's buffered
@@ -660,6 +676,22 @@ function createOriginalResponse(source, contentType, cacheHeaders) {
   );
 }
 
+// The untouched original can stand in for the encoded output only when it
+// already looks like what was requested. The width that counts is the one the
+// browser displays: EXIF orientations 5-8 swap the stored axes (the encoder
+// auto-rotates, a browser rotates the original on display), so the stored
+// height is the displayed width there. For multi-frame input `height` is the
+// stacked total and `pageHeight` is one frame.
+export function originalSatisfiesRequest(metadata, { grayscale, maxWidth }) {
+  if (maxWidth > 0) {
+    const rotated = Number(metadata.orientation) >= 5;
+    const displayedWidth = Number(rotated ? (metadata.pageHeight ?? metadata.height) : metadata.width);
+    if (!(displayedWidth > 0 && displayedWidth <= maxWidth)) return false;
+  }
+  if (grayscale && !(metadata.space === "b-w" || Number(metadata.channels) <= 2)) return false;
+  return true;
+}
+
 export async function handler(event = {}) {
   const startedAt = Date.now();
   const method = event.httpMethod || "GET";
@@ -724,9 +756,16 @@ export async function handler(event = {}) {
 
     // Never make a WebP client pay for a larger representation, but only fall
     // back to formats every Chromium browser displays; anything else stays
-    // WebP. Explicit jpeg=1 is a format request and is always honored for
-    // static images.
-    if (useWebp && compressed.length >= originalSize && BROWSER_SAFE_TYPES.has(detectedType)) {
+    // WebP. The original is only acceptable when it already satisfies the
+    // request: not wider than max_width, and already grayscale when bw=1.
+    // Explicit jpeg=1 is a format request and is always honored for static
+    // images.
+    if (
+      useWebp &&
+      compressed.length >= originalSize &&
+      BROWSER_SAFE_TYPES.has(detectedType) &&
+      originalSatisfiesRequest(metadata, { grayscale, maxWidth })
+    ) {
       return createOriginalResponse(source, detectedType, cacheHeaders);
     }
 
