@@ -2,27 +2,37 @@
 
 | Version | API | Status |
 |---|---:|---|
-| 2.2.19 | 1 | Stable |
+| 2.2.20 | 1 | Stable |
 
 ## Endpoint
 
 `GET /api/index`
 
 The endpoint accepts a URL-encoded upstream image and returns a compressed
-WebP/JPEG image. `GET /api/health` provides a lightweight compatibility check.
+image. **WebP is the default output**; JPEG is returned only when explicitly
+requested. `GET /api/health` provides a lightweight compatibility check.
 
 ## Query parameters
 
 | Parameter | Default | Description |
 |---|---:|---|
-| `url` | — | Full HTTP/HTTPS upstream image URL |
+| `url` | — | Full HTTP/HTTPS upstream image URL, URL-encoded (see below) |
 | `quality` | `60` | Compression quality, 1–100 |
 | `l` | `60` | Legacy alias for `quality` |
-| `bw` | `0` | `1` enables grayscale |
-| `jpeg` | `0` | `1` requests JPEG; otherwise WebP |
+| `bw` | `0` | `1` or `true` enables grayscale |
+| `jpeg` | `0` | `1` or `true` requests JPEG; any other value (or none) gives WebP |
 | `max_width` | `0` | Resize limit in pixels; 0 means no requested limit |
 
 No existing parameter was removed or renamed.
+
+The image URL is read from the raw query string:
+
+- **Encoded** (`url=encodeURIComponent(imageUrl)`, as Bandwidth Guardian
+  sends it): the value ends at the next `&` and is decoded once.
+- **Unencoded legacy** (value starts with `http://` or `https://`): the image
+  URL's own query string leaked into the outer one, so the value is taken
+  verbatim up to the first proxy parameter (`&quality=`, `&l=`, `&bw=`,
+  `&jpeg=`, `&max_width=`). Such responses use `Netlify-Vary: query`.
 
 A request without `url` is the legacy handshake: `200` with the plain-text body
 `bandwidth-hero-proxy` and `Cache-Control: public, max-age=300`.
@@ -36,17 +46,20 @@ clamps to 1 — a present value is never mistaken for an absent one.
 | Limit | Value |
 |---|---|
 | Upstream fetch deadline (DNS resolution + all redirect hops + body download) | 8 s |
-| Upstream socket inactivity timeout (resets on activity) | 5 s |
+| Upstream socket inactivity timeout (resets on activity; aborts the same deadline → `504`) | 5 s |
 | DNS lookup timeout (per hop, also bounded by the deadline above) | 2 s |
 | Redirects followed | 5 |
 | Source image size | 15 MiB (15 × 1024 × 1024 bytes) |
 | Source image pixels | 24 MP |
 | Response size target (before base64) | 4.3 MB (4,300,000 bytes) |
 | Sharp processing timeout | 8 s per pipeline; libuv queue wait is excluded |
+| Request budget (no new fallback encode starts after it) | 20 s from request start |
+| Fallback encodes after the first encode | 5 |
 
 ## Serverless image-processing defaults
 
-- Sharp WebP uses `effort: 4` to favor response time over maximum compression effort.
+- Sharp WebP uses `effort: 4` to favor response time over maximum compression effort, `smartSubsample: true`, and `mixed: true` for animated input only. `minSize` is not used (animation-only, ~3× slower for the same size in local measurements).
+- When the output would exceed the response target, one lower-quality encode is tried, then narrower widths chosen by a size model (size ∝ width^k, re-fitted from the last two measurements), within the fallback-encode and request-budget limits above.
 - Sharp uses `concurrency(1)` to keep per-image native thread usage predictable; this does not cap concurrent function invocations.
 - Each Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time spent waiting for a libuv worker, and the timeout is per pipeline rather than a whole-request deadline.
 - Input decoding is limited to 24 MP by default. Increase only after measuring peak memory and concurrent-request behavior on a Netlify deploy preview.
@@ -60,7 +73,8 @@ The proxy preserves:
 
 - `bandwidth-hero-proxy` no-URL handshake
 - `quality` and `l`
-- `jpeg=1` and `bw=1`
+- `jpeg=1` and `bw=1` (`true` is accepted for both)
+- unencoded legacy `url` values
 - relative upstream redirects
 - legacy `x-original-size`, `x-compressed-size`, `x-bytes-saved`
 - `x-bh-*` telemetry headers
@@ -76,7 +90,7 @@ uses the telemetry headers for statistics.
 HTTP/1.1 200 OK
 Content-Type: image/webp
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.19
+X-BH-Version: 2.2.20
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -94,10 +108,13 @@ animated bytes are returned unmodified, because JPEG cannot carry
 animation. If those bytes exceed the 4.3 MB response target, the request fails
 with `413` rather than producing a response Netlify would reject.
 
-If compression would make the representation larger, the original image bytes
-are returned instead and compressed/original size are equal. If the upstream
-omitted `Content-Type`, the fallback path detects the original image format
-before returning it so the response never labels original bytes as WebP/JPEG.
+For WebP output, if compression would make the representation larger, the
+original image bytes are returned instead and compressed/original size are
+equal, but only when the original is a format every Chromium browser displays
+(JPEG, PNG, GIF, WebP, AVIF). The media type is detected from the bytes, not
+taken from the upstream `Content-Type`. Any other format (TIFF, HEIC, JPEG XL,
+SVG) is always returned as WebP, even when larger. Explicit `jpeg=1` requests
+for static images are always returned as JPEG.
 
 ## Error responses
 
@@ -116,13 +133,13 @@ a broken deployment is diagnosable from the response body.
 | 400 | `url` is not a valid HTTP/HTTPS URL |
 | 403 | `url` is a literal private/local host, a hostname resolved to a private address, or a redirect led to a private address |
 | 405 | Method other than `GET`/`OPTIONS` (`Allow: GET, OPTIONS`) |
-| 413 | Source above 15 MB, optimized output cannot fit the response target, or original bytes above the target would have to be returned unmodified |
+| 413 | Source above 15 MiB, optimized output cannot fit the response target within the fallback-encode limit, or original bytes above the target would have to be returned unmodified |
 | 415 | Upstream explicitly returned a non-image `Content-Type` |
 | 4xx/5xx | Upstream error statuses are passed through |
 | 500 | Other processing failure (for example, undecodable image data) |
 | 502 | DNS failure, upstream connection failure `[<code>]`, or invalid redirect |
 | 503 | Sharp is unavailable on the runtime |
-| 504 | Upstream deadline exceeded (including a stalled body download) or Sharp processing timeout |
+| 504 | Upstream deadline or socket inactivity timeout (including a body that stalls mid-download), Sharp processing timeout, or request budget exhausted before a fitting output was found |
 | 508 | More than 5 redirects |
 
 ## Security
@@ -137,8 +154,12 @@ a broken deployment is diagnosable from the response body.
   rebind to a private address between the check and the connection.
 - Redirect destinations are re-resolved, re-checked, and re-pinned the same
   way before each hop is fetched.
-- Cookie and Referer request headers are stripped when a redirect crosses
-  origins; same-origin redirects keep them for compatibility.
+- Cookies are never forwarded upstream (a browser only sends the proxy
+  origin's own cookies to the proxy). `Referer` is forwarded and stripped
+  when a redirect crosses origins; same-origin redirects keep it.
+- The upstream `Accept` header is fixed rather than copied from the client,
+  so an `Accept`-negotiating CDN cannot place one client's format into the
+  shared cache.
 - IPv6 addresses that embed an IPv4 address (IPv4-mapped, NAT64 and 6to4) are
   judged by the embedded IPv4 address.
 - One 8 s deadline covers DNS resolution, every redirect hop and the body
@@ -149,7 +170,6 @@ a broken deployment is diagnosable from the response body.
 - Upstream response headers are allow-listed (`etag`, `last-modified`,
   `expires`) and are forwarded only when the original bytes are returned; a
   re-encoded image is a new representation and gets none of them.
-- Cookie-bearing requests use private, no-store caching.
 
 ### Address policy
 
@@ -199,7 +219,7 @@ environment.
 
 ## Caching
 
-Public requests use a 24-hour browser cache and a 30-day Netlify CDN cache:
+Image responses use a 24-hour browser cache and a 30-day Netlify CDN cache:
 
 ```text
 Cache-Control: public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800
@@ -207,7 +227,9 @@ Netlify-CDN-Cache-Control: public, durable, s-maxage=2592000, stale-while-revali
 Netlify-Vary: query=url|quality|bw|jpeg|max_width|l
 ```
 
-Cookie-bearing requests use `private, no-store`.
+Responses for unencoded legacy URLs whose own query string leaked into the
+outer one use `Netlify-Vary: query` instead, so different upstream URLs never
+share a cache entry. Errors use `private, no-store`.
 
 ## Netlify deployment
 
