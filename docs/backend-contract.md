@@ -2,7 +2,7 @@
 
 | Version | API | Status |
 |---|---:|---|
-| 2.2.18 | 1 | Stable |
+| 2.2.19 | 1 | Stable |
 
 ## Endpoint
 
@@ -76,7 +76,7 @@ uses the telemetry headers for statistics.
 HTTP/1.1 200 OK
 Content-Type: image/webp
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.18
+X-BH-Version: 2.2.19
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
