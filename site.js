@@ -49,7 +49,7 @@ async function runDiagnostics() {
     setStatus(
       "reachable",
       healthOk ? "ok" : "fail",
-      healthOk ? `API ${data.version ?? "unknown"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
+      healthOk ? `v${data.version ?? "?"} · API ${data.api ?? "?"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
     );
 
     if (healthOk && !sharpOk) {

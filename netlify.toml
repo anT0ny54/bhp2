@@ -23,18 +23,27 @@
   status = 200
   force = true
 
-[[headers]]
-  for = "/api/*"
-  [headers.values]
-    Access-Control-Allow-Origin = "*"
-    Access-Control-Allow-Methods = "GET, OPTIONS"
-    Access-Control-Allow-Headers = "*"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "no-referrer"
+# NOTE: CORS/security headers for /api/* responses are set inside the
+# functions from util/headers.js (the single source of truth). Do NOT
+# re-add them here — the hand-copied duplication between this file and
+# util/headers.js is exactly the drift pattern that caused regressions
+# in 2.2.4/2.2.6.
 
 [[headers]]
   for = "/*"
   [headers.values]
     X-Frame-Options = "DENY"
     X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
+    Referrer-Policy = "no-referrer"
+
+# Static site assets are stable between releases; modest browser caching
+# avoids re-downloading site.js/site.css on every repeat visit.
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"

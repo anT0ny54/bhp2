@@ -21,15 +21,16 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 - **WebP output** by default (best compression)
 - **JPEG output** with `jpeg=1` (mozjpeg, progressive)
 - **Grayscale conversion** with `bw=1`
-- **Quality control**: `quality` (1–100, default 60) plus legacy alias `l`
+- **Quality control**: `quality` (1–100, default 60; values below 1 clamp to 1, so `quality=0` ⇒ 1) plus legacy alias `l`
 - **Maximum-width resizing** (`max_width`, 0 = no limit, capped at 8192; never
   enlarges)
 - **EXIF auto-orientation**; metadata is stripped from re-encoded output
 - **Animated-image passthrough**: when JPEG output is requested, multi-frame
-  GIF/WebP/TIFF sources are returned untouched (detected from the bytes even
-  if the upstream omitted `Content-Type`). If those bytes exceed the 4.3 MB
-  response target the request fails with a clear `413` instead of an opaque
-  gateway error. WebP output keeps animation.
+  sources (GIF/WebP/TIFF/APNG/animated AVIF/HEIF) are returned untouched —
+  every `jpeg=1` source is probed for multiple frames from the bytes,
+  regardless of Content-Type. If those bytes exceed the 4.3 MB response
+  target the request fails with a clear `413` instead of an opaque gateway
+  error. WebP output keeps animation.
 - **Never-enlarge guarantee**: original bytes are returned (with format
   detection when the upstream omitted `Content-Type`) if compression would
   grow the file
@@ -52,17 +53,20 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
   the native `lookup` option of `node:http`/`node:https`
   (DNS-rebinding/TOCTOU protection). Public IPv6 literal URLs are supported.
 - **Diagnosable failures**: connector errors return
-  `502 Upstream connection failed [<code>].` instead of an opaque 500, an
-  upstream that stalls past the deadline returns `504`, and the diagnostics
-  page shows the server's error message
+  `502 Upstream connection failed [<code>].` instead of an opaque 500; an
+  upstream deadline or Sharp processing timeout returns `504`; and the
+  diagnostics page shows the server's error message
 - **Upstream limits**: 8 s total fetch timeout (one deadline for DNS
   resolution, all hops and the body download; a stalled resolver is abandoned
-  at the deadline and no request starts after it), 15 MiB input, 24 MP input
-  pixels
-- **Serverless processing defaults**: WebP quality 60 and `effort: 4`; Sharp
-  uses `concurrency(1)` to limit libvips threads per image, not total concurrent
-  function invocations. The Sharp cache and Node/libuv thread-pool defaults are
-  unchanged.
+  at the deadline and no request starts after it), 5 s socket inactivity
+  timeout (resets on activity, backstop under the deadline), 15 MiB input,
+  24 MP input pixels
+- **Serverless processing defaults**: WebP quality 60 and `effort: 4`; each
+  Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time
+  waiting for a libuv worker, and this is a per-pipeline limit, not a whole-
+  request deadline. Sharp uses `concurrency(1)` to limit libvips threads per
+  image, not total concurrent function invocations. The Sharp cache and
+  Node/libuv thread-pool defaults are unchanged.
 - **Current encoder options**: WebP uses `smartSubsample: true`, `minSize: true`,
   and `mixed: true`; JPEG uses progressive encoding, `mozjpeg: true`, and
   `4:2:0` chroma subsampling.
@@ -122,15 +126,18 @@ Full contract (status codes, limits, headers):
 > [!NOTE]
 > When bumping `sharp`, bump the four `@img/sharp-*` pins in
 > `optionalDependencies` to the versions that `sharp` itself declares, or the
-> installed native binary will not match the JavaScript wrapper.
+> installed native binary will not match the JavaScript wrapper. CI enforces
+> this with `yarn run check:sharp-pins` (`scripts/check-sharp-pins.mjs`),
+> which fails the build if the pins drift from the installed `sharp`'s own
+> `optionalDependencies`.
 
 ## 🧪 Testing
 
 ```bash
-yarn install               # installs dependencies; keeps yarn.lock in sync
-yarn test                  # every suite below (82 tests)
-yarn test:fast             # network-free suites only (33 tests, well under a second)
-yarn test:integration      # Sharp + local-server suites (49 tests, roughly 15 s)
+yarn install               # installs dependencies; yarn.lock remains authoritative
+yarn test                  # all 44 tests across the five checked-in suites
+yarn test:fast             # 23 network-free tests (address policy, handlers, health)
+yarn test:integration      # 21 Sharp/loopback tests (compression + request integration)
 yarn run check             # full local gate (syntax validation + all tests), same as CI
 ```
 
@@ -145,23 +152,31 @@ Suites:
 
 | File | Scope |
 |---|---|
-| `tests/index.test.js` | Handler behavior (handshake, CORS, 405, URL/host rejection), URL parsing, pinned lookup, DNS validation, and the DNS step's handling of the shared deadline. No network, no Sharp. |
-| `tests/health.test.js` | `/api/health` plus version/feature consistency across `package.json`, `util/version.js` and `docs/backend-contract.md`. |
-| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries (first/last address inside, neighbours outside), IPv6 global-unicast edges, IANA special-purpose fixtures, embedded-IPv4 forms, and fail-closed handling of malformed input. |
-| `tests/compress.test.js` | Adaptive fallback widths and `compressImage` with real Sharp encodes, including regression tests for `max_width` 100, 320 and 800, JPEG output, never-enlarge and the `413` case. |
-| `tests/integration.test.js` | The full handler against local `node:http` servers: WebP/JPEG output, grayscale, resizing, animation preservation, original-bytes fallback and headers, redirects (same-origin, cross-origin credential stripping, private targets, redirect limit), socket pinning, input-size limits, malformed/truncated images, upstream errors, and the shared 8 s deadline (slow body, stalled DNS, DNS stalling mid-redirect-chain, late DNS answers, accumulated slow hops). |
+| `tests/index.test.js` | Handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, and fallback-width generation. No network or Sharp encoding. |
+| `tests/health.test.js` | `/api/health`, method handling, and consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, and `docs/backend-contract.md`. |
+| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, and malformed-address rejection. |
+| `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, and undecodable input. |
+| `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, unsupported redirect schemes, upstream timeout mapping, and WebP telemetry headers. |
 
-The integration suites use a small test-only configuration hook in
+The five checked-in suites currently contain 44 tests: 23 in `test:fast` and
+21 in `test:integration`.
+
+The integration suite uses a small test-only configuration hook in
 `functions/index.js` (`configureForTests`) to shorten the deadline and shrink
-size limits, and a test resolver that maps validated test hostnames to
-`127.0.0.1`. Production defaults are unchanged and the hook is not reachable
-from a request.
+size limits. It requests `proxy.test`, which the test resolver pins to
+`127.0.0.1`; using a literal loopback URL would correctly be rejected by the
+production SSRF guard before the resolver is reached. Production defaults are
+unchanged and the hook is not reachable from a request.
 
-What the suites do **not** establish: HTTPS requests (a trusted test
-certificate would be needed; the pinning mechanism is the same `lookup` option
-for both protocols), behavior against real internet hosts, and real Netlify
-latency, peak memory, cold-start time, deployment artifact size or
-concurrent-load safety. Validate those separately with a Deploy Preview.
+What the suites do **not** establish: a real HTTPS request (a trusted test
+certificate would be needed; pinning uses the same `lookup` option for both
+protocols), behavior against real internet hosts, or real Netlify latency, peak
+memory, cold-start time, deployment artifact size, and concurrent-load safety.
+The integration suite currently covers the scenarios listed above; it does not
+yet test redirect credential stripping, redirect limits/private targets, input
+size and pixel limits, or slow-body/DNS deadline edge cases. Validate those
+separately with a Deploy Preview and add focused regression tests when changing
+those paths.
 
 > [!NOTE]
 > **SSRF & DNS Rebinding**: `resolveAndValidateRemoteUrl` resolves the hostname
@@ -246,7 +261,11 @@ can be verified; do not reconstruct history from memory.
 
 ---
 
-## 🌐 Free DNS Services
+## 🔗 Related projects (not part of this repository)
+
+The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+
+### 🌐 Free DNS Services
 
 High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
@@ -259,6 +278,13 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
 | Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
+### ⚡ Bandwidth Hero Server
+
+A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
+
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
+
+🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 
 ## Supporting the Project
 
