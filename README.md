@@ -18,8 +18,9 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 
 ## ✨ Features (verified against the code)
 
-- **WebP output** by default (best compression)
-- **JPEG output** with `jpeg=1` (mozjpeg, progressive)
+- **WebP output by default** (best compression). Only an explicit `jpeg=1`
+  or `jpeg=true` selects JPEG; Bandwidth Guardian always sends `jpeg=0`
+- **JPEG output** with `jpeg=1` / `jpeg=true` (mozjpeg, progressive)
 - **Grayscale conversion** with `bw=1`
 - **Quality control**: `quality` (1–100, default 60; values below 1 clamp to 1, so `quality=0` ⇒ 1) plus legacy alias `l`
 - **Maximum-width resizing** (`max_width`, 0 = no limit, capped at 8192; never
@@ -31,17 +32,25 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
   regardless of Content-Type. If those bytes exceed the 4.3 MB response
   target the request fails with a clear `413` instead of an opaque gateway
   error. WebP output keeps animation.
-- **Never-enlarge guarantee**: original bytes are returned (with format
-  detection when the upstream omitted `Content-Type`) if compression would
-  grow the file
-- **Adaptive output fallback**: quality, then width, are progressively reduced
-  to stay under Netlify's 6 MB buffered response limit (4.3 MB binary safety
-  target). Fallback widths are always strictly below a requested `max_width`
-  and continue down to 16 px, so even small limits (for example
-  `max_width=100`) still have narrower sizes to try; images are never enlarged
+- **Never-enlarge guarantee (WebP output)**: if the WebP encoding would be
+  larger than the source, the original bytes are returned instead, but only
+  when they are a format every Chromium browser displays (JPEG, PNG, GIF,
+  WebP, AVIF). The media type is detected from the bytes, not trusted from
+  the upstream `Content-Type`. Other formats (TIFF, HEIC, JPEG XL, SVG) are
+  always served as WebP. Explicit `jpeg=1` requests stay JPEG even when larger
+- **Adaptive output fallback**: to stay under Netlify's 6 MB buffered response
+  limit (4.3 MB binary safety target), one lower-quality encode is tried,
+  then narrower widths chosen by a size model (size ∝ width^k, re-fitted from
+  each measurement). At most 5 fallback encodes run, and none starts after
+  the 20 s request budget (`504`). Fallback widths are always strictly below
+  a requested `max_width` and continue down to 16 px (1 px for tiny limits);
+  images are never enlarged
+- **Legacy URL support**: the image URL is read from the raw query string.
+  Encoded URLs (Bandwidth Guardian) are decoded once; unencoded legacy URLs
+  keep their own query string up to the first proxy parameter and are cached
+  with `Netlify-Vary: query`
 - **Manual redirect handling**: bounded at 5 hops; every hop is re-resolved,
-  re-validated and re-pinned; `Cookie`/`Referer` are stripped on cross-origin
-  hops
+  re-validated and re-pinned; `Referer` is stripped on cross-origin hops
 - **SSRF protection**: HTTP/HTTPS-only URLs; an explicit, table-driven
   address policy covering private, loopback, link-local, CGNAT, documentation,
   benchmarking, multicast and reserved IPv4 **and** IPv6 ranges (IPv6 allows
@@ -59,30 +68,36 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 - **Upstream limits**: 8 s total fetch timeout (one deadline for DNS
   resolution, all hops and the body download; a stalled resolver is abandoned
   at the deadline and no request starts after it), 5 s socket inactivity
-  timeout (resets on activity, backstop under the deadline), 15 MiB input,
-  24 MP input pixels
+  timeout (resets on activity; a stall before the headers, between bytes or
+  mid-body returns `504`), 15 MiB input, 24 MP input pixels
+- **Upstream request headers**: a fixed image `Accept` header (never the
+  client's, so a negotiating CDN cannot put one client's format into the
+  shared cache), the client's `User-Agent`, `Accept-Language`, `DNT` and
+  `Referer`. **Cookies are never forwarded**
 - **Serverless processing defaults**: WebP quality 60 and `effort: 4`; each
   Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time
   waiting for a libuv worker, and this is a per-pipeline limit, not a whole-
   request deadline. Sharp uses `concurrency(1)` to limit libvips threads per
   image, not total concurrent function invocations. The Sharp cache and
   Node/libuv thread-pool defaults are unchanged.
-- **Current encoder options**: WebP uses `smartSubsample: true`, `minSize: true`,
-  and `mixed: true`; JPEG uses progressive encoding, `mozjpeg: true`, and
-  `4:2:0` chroma subsampling.
+- **Current encoder options**: WebP uses `effort: 4` and `smartSubsample: true`,
+  plus `mixed: true` for animated input only (`minSize` is not used: it made
+  animated encodes ~3× slower for the same size); JPEG uses progressive
+  encoding, `mozjpeg: true`, and `4:2:0` chroma subsampling.
 - **Allow-listed upstream response headers** (`etag`, `last-modified`,
   `expires`), forwarded only when the original bytes are returned unchanged
 - **CORS support** for cross-origin requests
-- **Caching**: 24 h browser / 30 day Netlify CDN for public responses;
-  `private, no-store` for cookie-bearing requests and for every error;
-  `Netlify-Vary` pins the cache key to the extension query params
+- **Caching**: 24 h browser / 30 day Netlify CDN for every image response;
+  `private, no-store` for every error; `Netlify-Vary` pins the cache key to
+  the extension query params (the whole query for unencoded legacy URLs)
 - **Telemetry headers**: `x-bh-*` plus legacy `x-original-size`,
   `x-compressed-size`, `x-bytes-saved`
 - **Handshake response** (`bandwidth-hero-proxy`) for requests without a `url`
 - **Health check endpoint** (`/api/health`) reporting Sharp status, version,
   API level and features
 - **Built-in diagnostics page** with reachability, CORS/handshake, live image
-  compression, and cache-header checks
+  compression, and cache-header checks; checks that could not run are shown
+  as "Skipped", and the header badge reflects the last run
 - **Netlify Functions** deployment ready (esbuild; Sharp externalized).
   `netlify.toml` includes only `node_modules/sharp` (the JavaScript package)
   plus the two **Linux x64** native packages, `@img/sharp-linux-x64` and
@@ -120,8 +135,9 @@ Full contract (status codes, limits, headers):
   Netlify function (see `netlify.toml`); the arm64 pins support installation
   on ARM64 Linux machines. Upstream fetching uses Node's standard-library
   `node:http`/`node:https`, so there is no HTTP-client dependency.
-- **Dev dependency**: `netlify-cli` for local development (`yarn dev` /
-  `yarn start`)
+- **No dev dependencies**: `yarn start` / `yarn dev` run `netlify-cli`
+  27.12.0 through `npx`, so CI and Netlify builds install only Sharp
+  (`yarn.lock` has 32 entries)
 
 > [!NOTE]
 > When bumping `sharp`, bump the four `@img/sharp-*` pins in
@@ -129,16 +145,17 @@ Full contract (status codes, limits, headers):
 > installed native binary will not match the JavaScript wrapper. CI enforces
 > this with `yarn run check:sharp-pins` (`scripts/check-sharp-pins.mjs`),
 > which fails the build if the pins drift from the installed `sharp`'s own
-> `optionalDependencies`.
+> `optionalDependencies`. Dependabot groups `sharp` and `@img/sharp-*` into
+> one PR so bumps arrive together.
 
 ## 🧪 Testing
 
 ```bash
 yarn install               # installs dependencies; yarn.lock remains authoritative
-yarn test                  # all 44 tests across the five checked-in suites
-yarn test:fast             # 23 network-free tests (address policy, handlers, health)
-yarn test:integration      # 21 Sharp/loopback tests (compression + request integration)
-yarn run check             # full local gate (syntax validation + all tests), same as CI
+yarn test                  # all 59 tests across the five checked-in suites
+yarn test:fast             # 26 network-free tests (address policy, handlers, health)
+yarn test:integration      # 33 Sharp/loopback tests (compression + request integration)
+yarn run check             # full local gate (site/script syntax check + all tests), same as CI
 ```
 
 > [!IMPORTANT]
@@ -152,14 +169,14 @@ Suites:
 
 | File | Scope |
 |---|---|
-| `tests/index.test.js` | Handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, and fallback-width generation. No network or Sharp encoding. |
+| `tests/index.test.js` | Handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, fallback-width generation, and raw-query URL extraction (encoded, legacy unencoded, absent). No network or Sharp encoding. |
 | `tests/health.test.js` | `/api/health`, method handling, and consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, and `docs/backend-contract.md`. |
 | `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, and malformed-address rejection. |
-| `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, and undecodable input. |
-| `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, unsupported redirect schemes, upstream timeout mapping, and WebP telemetry headers. |
+| `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, undecodable input, the bounded fallback encode count, and the request-budget `504`. |
+| `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, `jpeg=true`, unsupported redirect schemes, the `508` redirect limit, `Referer` handling on same/cross-origin redirects, fixed `Accept` and no `Cookie` upstream, legacy and encoded raw-query URLs, upstream timeout and mid-body stall mapping, the `413` input limit, never-enlarge with detected type, non-browser formats staying WebP, and WebP telemetry headers. |
 
-The five checked-in suites currently contain 44 tests: 23 in `test:fast` and
-21 in `test:integration`.
+The five checked-in suites currently contain 59 tests: 26 in `test:fast` and
+33 in `test:integration`.
 
 The integration suite uses a small test-only configuration hook in
 `functions/index.js` (`configureForTests`) to shorten the deadline and shrink
@@ -173,8 +190,8 @@ certificate would be needed; pinning uses the same `lookup` option for both
 protocols), behavior against real internet hosts, or real Netlify latency, peak
 memory, cold-start time, deployment artifact size, and concurrent-load safety.
 The integration suite currently covers the scenarios listed above; it does not
-yet test redirect credential stripping, redirect limits/private targets, input
-size and pixel limits, or slow-body/DNS deadline edge cases. Validate those
+yet test redirects to private targets (the real resolver is stubbed), the
+24 MP pixel limit, or DNS deadline edge cases. Validate those
 separately with a Deploy Preview and add focused regression tests when changing
 those paths.
 
@@ -263,7 +280,14 @@ can be verified; do not reconstruct history from memory.
 
 ## 🔗 Related projects (not part of this repository)
 
-The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+The projects below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+
+### 🧩 Bandwidth Guardian
+
+[Bandwidth Guardian](https://github.com/anT0ny54/bandwidth-guardian) is the
+Chromium extension this proxy is built for. It rewrites image URLs to
+`/api/index?url=<encoded>&jpeg=0&bw=<0|1>&quality=<1-100>[&max_width=<px>]`
+and reads the `x-bh-*` telemetry headers for its statistics.
 
 ### 🌐 Free DNS Services
 
@@ -277,14 +301,6 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
 | Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
 | Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
-
-### ⚡ Bandwidth Hero Server
-
-A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
-
-Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
-
-🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 
 ## Supporting the Project
 

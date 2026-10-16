@@ -53,7 +53,9 @@ h1{margin:0;font-size:clamp(27px,5vw,42px);line-height:1.05;letter-spacing:-.035
   display:inline-flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid var(--line);
   border-radius:999px;background:var(--surface);color:var(--muted);font-size:12px;white-space:nowrap
 }
-.dot{width:7px;height:7px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 4px rgba(110,231,183,.10)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px rgba(145,165,184,.12)}
+.badge.ok .dot{background:var(--accent-2);box-shadow:0 0 0 4px rgba(110,231,183,.10)}
+.badge.fail .dot{background:var(--danger);box-shadow:0 0 0 4px rgba(251,113,133,.12)}
 .grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(280px,.8fr);gap:16px}
 .card{
   background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
@@ -85,7 +87,7 @@ h1{margin:0;font-size:clamp(27px,5vw,42px);line-height:1.05;letter-spacing:-.035
 .status-title{font-weight:750;font-size:13px}
 .status-detail{margin-top:1px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
 .state{font-size:11px;font-weight:850}
-.state.pending{color:var(--muted)}.state.ok{color:var(--accent-2)}.state.fail{color:var(--danger)}
+.state.pending,.state.skip{color:var(--muted)}.state.ok{color:var(--accent-2)}.state.fail{color:var(--danger)}
 .quick{display:grid;gap:10px}
 .quick-item{padding:14px;border:1px solid var(--line);border-radius:15px;background:var(--surface-strong)}
 .quick-item strong{display:block;font-size:13px;margin-bottom:3px}.quick-item span{display:block;color:var(--muted);font-size:12px}

@@ -19,7 +19,7 @@
           <p class="lead">A lightweight image-compression proxy for Bandwidth Guardian and other Bandwidth Hero-compatible Chromium extensions.</p>
         </div>
       </div>
-      <div class="badge"><span class="dot"></span> Netlify proxy online</div>
+      <div class="badge pending" id="status-badge" aria-live="polite"><span class="dot"></span> <span id="status-badge-text">Status not checked</span></div>
     </header>
 
     <section class="grid">
@@ -65,10 +65,10 @@
         <div class="card-inner">
           <h2>Designed for your extension</h2>
           <div class="quick">
-            <div class="quick-item"><strong>WebP / JPEG</strong><span>WebP by default, with JPEG fallback support.</span></div>
+            <div class="quick-item"><strong>WebP by default</strong><span>WebP output unless a client explicitly requests JPEG with <code>jpeg=1</code>.</span></div>
             <div class="quick-item"><strong>Bandwidth savings</strong><span>Quality and maximum-width controls are preserved.</span></div>
             <div class="quick-item"><strong>Safe fetching</strong><span>HTTP(S)-only URLs, private-IP blocking, redirect validation and input limits.</span></div>
-            <div class="quick-item"><strong>CDN friendly</strong><span>Public results are cacheable; cookie-bearing requests stay private.</span></div>
+            <div class="quick-item"><strong>CDN friendly</strong><span>Results are cached by the Netlify CDN; cookies are never forwarded upstream.</span></div>
           </div>
         </div>
       </aside>

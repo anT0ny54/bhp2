@@ -6,16 +6,27 @@ $("proxy-url").textContent = proxyUrl;
 
 // Display labels live in index.html; only the element-id prefixes are needed here.
 const diagnostics = ["reachable", "cors", "compression", "cache"];
-const remainingDiagnostics = diagnostics.slice(1);
+
+// state: "pending" | "ok" | "fail" | "skip" (not run because an earlier check failed).
+const STATE_LABELS = { pending: "Pending", ok: "Passed", fail: "Failed", skip: "Skipped" };
+const STATE_ICONS = { pending: "•", ok: "✓", fail: "!", skip: "–" };
 
 function setStatus(id, state, detail = "") {
-  const status = $(`${id}-status`);
-  const metric = $(`${id}-metric`);
-  const icon = $(`${id}-icon`);
-  status.className = `state ${state}`;
-  status.textContent = state === "ok" ? "Passed" : state === "fail" ? "Failed" : "Pending";
-  metric.textContent = detail;
-  icon.textContent = state === "ok" ? "✓" : state === "fail" ? "!" : "•";
+  $(`${id}-status`).className = `state ${state}`;
+  $(`${id}-status`).textContent = STATE_LABELS[state];
+  $(`${id}-metric`).textContent = detail;
+  $(`${id}-icon`).textContent = STATE_ICONS[state];
+}
+
+function hasState(id, state) {
+  return $(`${id}-status`).classList.contains(state);
+}
+
+// The header badge reflects the last diagnostics run instead of claiming
+// "online" unconditionally.
+function setBadge(state, text) {
+  $("status-badge").className = `badge ${state}`;
+  $("status-badge-text").textContent = text;
 }
 
 function resetStatuses() {
@@ -35,6 +46,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 8000) {
 async function runDiagnostics() {
   const button = $("diagnostics-button");
   resetStatuses();
+  setBadge("pending", "Checking…");
   button.disabled = true;
   button.textContent = "Running…";
 
@@ -51,15 +63,14 @@ async function runDiagnostics() {
       healthOk ? "ok" : "fail",
       healthOk ? `v${data.version ?? "?"} · API ${data.api ?? "?"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
     );
-
-    if (healthOk && !sharpOk) {
-      setStatus("compression", "fail", sharpError);
-    }
+    setBadge(healthOk ? "ok" : "fail", healthOk ? "Proxy online" : "Proxy unreachable");
 
     if (!healthOk) {
-      for (const id of remainingDiagnostics) setStatus(id, "fail", "Diagnostics stopped");
+      for (const id of diagnostics.slice(1)) setStatus(id, "skip", "Health check failed");
       return;
     }
+
+    if (!sharpOk) setStatus("compression", "fail", sharpError);
 
     const handshake = await fetchWithTimeout(proxyPath);
     const body = (await handshake.text()).trim();
@@ -69,8 +80,9 @@ async function runDiagnostics() {
     setStatus("cors", corsOk ? "ok" : "fail", corsOk ? "Handshake and CORS verified" : `HTTP ${handshake.status}`);
 
     if (!corsOk) {
-      setStatus("compression", "fail", "Handshake check failed");
-      setStatus("cache", "fail", "Handshake check failed");
+      // Keep a Sharp failure already reported by the health check.
+      if (sharpOk) setStatus("compression", "skip", "Handshake check failed");
+      setStatus("cache", "skip", "Handshake check failed");
       return;
     }
 
@@ -102,21 +114,30 @@ async function runDiagnostics() {
       compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : sharpOk ? compressionDetail : sharpError
     );
 
+    // Error responses are deliberately private/no-store, so the cache check
+    // is only meaningful for a successful image response.
+    if (!compressedOk) {
+      setStatus("cache", "skip", "Image check failed");
+      return;
+    }
     const cache = image.headers.get("cache-control") || "";
     const cacheOk = /^public,/i.test(cache);
     setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Browser/CDN cache headers verified" : "Public Cache-Control header missing");
   } catch (error) {
     const detail = error?.name === "AbortError" ? "Request timed out" : "Connection or CORS error";
-    // Only mark reachability failed if it hasn't already passed; a timeout in
-    // a later stage (compression/cache fetch) must not rewrite an earlier
-    // passing result.
-    if (!$("reachable-status").classList.contains("ok")) {
-      setStatus("reachable", "fail", detail);
-    }
-    for (const id of remainingDiagnostics) {
-      if (!$(`${id}-status`).classList.contains("ok")) {
-        setStatus(id, "fail", "Diagnostics stopped");
+    // Results already shown (passed checks, or a failure such as "Sharp
+    // unavailable") are kept. Only the first unfinished check reports this
+    // error, and only if nothing has failed yet; the rest were never run.
+    let failureShown = diagnostics.some((id) => hasState(id, "fail"));
+    for (const id of diagnostics) {
+      if (!hasState(id, "pending")) continue;
+      if (failureShown) {
+        setStatus(id, "skip", "Diagnostics stopped");
+        continue;
       }
+      setStatus(id, "fail", detail);
+      failureShown = true;
+      if (id === "reachable") setBadge("fail", "Proxy unreachable");
     }
   } finally {
     button.disabled = false;
@@ -124,14 +145,17 @@ async function runDiagnostics() {
   }
 }
 
+function flashCopyLabel(text) {
+  $("copy-button").textContent = text;
+  setTimeout(() => { $("copy-button").textContent = "Copy URL"; }, 1400);
+}
+
 $("diagnostics-button").addEventListener("click", runDiagnostics);
 $("copy-button").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(proxyUrl);
-    $("copy-button").textContent = "Copied ✓";
-    setTimeout(() => $("copy-button").textContent = "Copy URL", 1400);
+    flashCopyLabel("Copied ✓");
   } catch {
-    $("copy-button").textContent = "Copy unavailable";
-    setTimeout(() => $("copy-button").textContent = "Copy URL", 1400);
+    flashCopyLabel("Copy unavailable");
   }
 });
