@@ -1,16 +1,16 @@
 {
   "name": "bandwidth-hero-proxy2",
-  "version": "2.2.20",
+  "version": "2.2.24",
   "description": "Bandwidth Hero-compatible image compression proxy optimized for Netlify Functions and mobile-friendly diagnostics",
   "type": "module",
   "scripts": {
     "start": "npx --yes netlify-cli@27.12.0 dev",
     "dev": "npx --yes netlify-cli@27.12.0 dev --offline",
     "validate": "node --check site.js && node --check scripts/check-sharp-pins.mjs",
-    "test": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js tests/compress.test.js tests/integration.test.js",
-    "test:fast": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js",
+    "test": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js tests/site.test.js tests/compress.test.js tests/integration.test.js",
+    "test:fast": "node --test tests/index.test.js tests/health.test.js tests/address-policy.test.js tests/site.test.js",
     "test:integration": "node --test tests/compress.test.js tests/integration.test.js",
-    "check": "yarn run validate && yarn test",
+    "check": "yarn run validate && yarn run check:sharp-pins && yarn test",
     "check:sharp-pins": "node scripts/check-sharp-pins.mjs"
   },
   "dependencies": {

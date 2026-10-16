@@ -33,15 +33,25 @@ function resetStatuses() {
   for (const id of diagnostics) setStatus(id, "pending", "");
 }
 
-async function fetchWithTimeout(url, options = {}, timeout = 8000) {
+// One deadline covers the response headers AND the body read: `read` runs
+// before the timer is cleared. Clearing it as soon as the headers arrived let
+// a body that stalled afterwards hang the run with the button stuck on
+// "Running…". Aborting mid-body rejects with AbortError, handled below.
+async function fetchWithTimeout(url, read, timeout = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    return await fetch(url, { ...options, signal: controller.signal, cache: "no-store" });
+    const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    return { response, body: await read(response) };
   } finally {
     clearTimeout(timer);
   }
 }
+
+const isAbort = (error) => error?.name === "AbortError";
+// A malformed body is a normal failed check (null); only a timeout propagates.
+const readJson = (response) => response.json().catch((error) => { if (isAbort(error)) throw error; return null; });
+const readText = (response) => response.text();
 
 async function runDiagnostics() {
   const button = $("diagnostics-button");
@@ -51,9 +61,7 @@ async function runDiagnostics() {
   button.textContent = "Running…";
 
   try {
-    const health = await fetchWithTimeout("/api/health");
-    let data = null;
-    try { data = await health.json(); } catch {}
+    const { response: health, body: data } = await fetchWithTimeout("/api/health", readJson);
     const healthOk = health.ok && data?.status === "ok";
     const sharpOk = data?.sharp?.available === true;
     const sharpError = `Sharp unavailable: ${data?.sharp?.error || "runtime module missing"}`;
@@ -72,10 +80,9 @@ async function runDiagnostics() {
 
     if (!sharpOk) setStatus("compression", "fail", sharpError);
 
-    const handshake = await fetchWithTimeout(proxyPath);
-    const body = (await handshake.text()).trim();
+    const { response: handshake, body: handshakeBody } = await fetchWithTimeout(proxyPath, readText);
     const corsOk = handshake.ok &&
-      body === "bandwidth-hero-proxy" &&
+      handshakeBody.trim() === "bandwidth-hero-proxy" &&
       handshake.headers.get("access-control-allow-origin") === "*";
     setStatus("cors", corsOk ? "ok" : "fail", corsOk ? "Handshake and CORS verified" : `HTTP ${handshake.status}`);
 
@@ -89,25 +96,39 @@ async function runDiagnostics() {
     // GitHub's public avatar is intentionally fetched by the proxy, not by this page.
     const sample = "https://avatars.githubusercontent.com/u/9919";
     const started = performance.now();
+    const isCompressedImage = (response) =>
+      response.ok &&
+      (response.headers.get("content-type") || "").startsWith("image/") &&
+      Number(response.headers.get("x-bh-original-size") || 0) > 0;
     // The server's own upstream deadline is 8 s, so give this request more
     // headroom than that; otherwise the page aborts first and can never show
     // the server's 504 message.
-    const image = await fetchWithTimeout(`${proxyPath}?url=${encodeURIComponent(sample)}`, {}, 15000);
+    const { response: image, body: serverMessage } = await fetchWithTimeout(
+      `${proxyPath}?url=${encodeURIComponent(sample)}`,
+      async (response) => {
+        if (isCompressedImage(response)) {
+          // Only the headers are needed; don't download the image body.
+          await response.body?.cancel();
+          return "";
+        }
+        // On failure, surface the server's error body so a broken upstream
+        // path is diagnosable straight from the diagnostics panel.
+        try {
+          return (await response.text()).trim().slice(0, 160);
+        } catch (error) {
+          if (isAbort(error)) throw error;
+          return "";
+        }
+      },
+      15000,
+    );
     const elapsed = Math.round(performance.now() - started);
     const type = image.headers.get("content-type") || "";
     const original = Number(image.headers.get("x-bh-original-size") || 0);
     const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
     const ratio = original > 0 ? `${((saved / original) * 100).toFixed(1)}% saved` : "size telemetry unavailable";
-    const compressedOk = image.ok && type.startsWith("image/") && original > 0;
-    // On failure, surface the server's error body so a broken upstream path
-    // is diagnosable straight from the diagnostics panel.
-    let compressionDetail = `HTTP ${image.status}`;
-    if (!compressedOk) {
-      try {
-        const serverMessage = (await image.text()).trim().slice(0, 160);
-        if (serverMessage) compressionDetail = `HTTP ${image.status}: ${serverMessage}`;
-      } catch {}
-    }
+    const compressedOk = isCompressedImage(image);
+    const compressionDetail = serverMessage ? `HTTP ${image.status}: ${serverMessage}` : `HTTP ${image.status}`;
     setStatus(
       "compression",
       compressedOk ? "ok" : "fail",
@@ -124,7 +145,7 @@ async function runDiagnostics() {
     const cacheOk = /^public,/i.test(cache);
     setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Browser/CDN cache headers verified" : "Public Cache-Control header missing");
   } catch (error) {
-    const detail = error?.name === "AbortError" ? "Request timed out" : "Connection or CORS error";
+    const detail = isAbort(error) ? "Request timed out" : "Connection or CORS error";
     // Results already shown (passed checks, or a failure such as "Sharp
     // unavailable") are kept. Only the first unfinished check reports this
     // error, and only if nothing has failed yet; the rest were never run.
