@@ -7,10 +7,16 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      # sharp and its native @img/* packages must move together; a sharp-only
+      # bump is rejected by `yarn run check:sharp-pins` in CI by design.
+      sharp:
+        patterns:
+          - "sharp"
+          - "@img/sharp-*"
 
   # Keep GitHub Actions up to date
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-      
