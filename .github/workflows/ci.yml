@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  # Also lets the lockfile PR branch be checked by hand when it was opened
+  # with GITHUB_TOKEN (which does not trigger pull_request workflows).
   workflow_dispatch:
 
 concurrency:

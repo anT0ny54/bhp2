@@ -55,7 +55,12 @@ jobs:
       - name: Create pull request for lockfile changes
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ github.token }}
+          # Pull requests opened with the default GITHUB_TOKEN do not trigger
+          # other workflows, so CI would never run on the lockfile PR. Store a
+          # fine-grained PAT (contents + pull-requests: write) or GitHub App
+          # token as the LOCKFILE_PR_TOKEN secret to get CI on it; without the
+          # secret this falls back to GITHUB_TOKEN and CI must be run manually.
+          token: ${{ secrets.LOCKFILE_PR_TOKEN || github.token }}
           branch: chore/update-yarn-lock
           delete-branch: true
           base: main
@@ -70,3 +75,4 @@ jobs:
             - Runs the Sharp native-package pin check before proposing the lockfile.
 
             Please review the dependency diff and ensure CI passes before merging.
+            If CI did not start automatically (no `LOCKFILE_PR_TOKEN` secret), run the CI workflow manually on this branch.
