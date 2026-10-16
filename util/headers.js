@@ -1,18 +1,16 @@
-// Shared response header fragments for the function handlers.
-//
-// functions/index.js and functions/health.js used to hand-maintain their own
-// copies of these headers. The version-string drift that bit this project
-// twice (see CHANGELOG 2.2.4 and 2.2.6) was the same duplication pattern, so
-// the common headers now live in exactly one place and both handlers import
-// them. Handler-specific headers (Content-Type, Cache-Control, telemetry)
-// still belong to each handler.
-export const CORS_HEADERS = Object.freeze({
+// Single source of truth for the CORS/security headers shared by every
+// /api/* response. netlify.toml deliberately carries NO hand-copied
+// [[headers]] block for /api/* anymore — that copy used to drift from the
+// runtime headers. Static assets get their Cache-Control from netlify.toml
+// (public, max-age=3600 for site.js/site.css), not from here.
+export const BASE_HEADERS = Object.freeze({
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "*",
-});
-
-export const SECURITY_HEADERS = Object.freeze({
+  "access-control-allow-headers": "Content-Type, Authorization",
+  "access-control-max-age": "86400",
+  "cross-origin-resource-policy": "cross-origin",
   "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
 });
