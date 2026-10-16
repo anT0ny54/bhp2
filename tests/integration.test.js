@@ -73,10 +73,26 @@ test("jpeg=1 flattens transparency onto white, not black", async () => {
 });
 
 test("animated sources pass through untouched on jpeg=1 regardless of Content-Type", async () => {
-  const frame = await sharp({
-    create: { width: 32, height: 32, channels: 3, background: { r: 255, g: 0, b: 0 } },
-  }).png().toBuffer();
-  const animated = await sharp([frame, frame, frame], { animated: true }).webp().toBuffer();
+  // Build three distinct raw frames stacked vertically. Sharp's raw
+  // pageHeight option marks the frame boundaries; passing an array of encoded
+  // buffers to sharp() does not reliably create an animated output.
+  const frameSize = 32 * 32 * 3;
+  const frame = (r, g, b) => {
+    const pixels = Buffer.alloc(frameSize);
+    for (let offset = 0; offset < pixels.length; offset += 3) {
+      pixels[offset] = r;
+      pixels[offset + 1] = g;
+      pixels[offset + 2] = b;
+    }
+    return pixels;
+  };
+  const animated = await sharp(Buffer.concat([
+    frame(255, 0, 0),
+    frame(0, 255, 0),
+    frame(0, 0, 255),
+  ]), {
+    raw: { width: 32, height: 96, channels: 3, pageHeight: 32 },
+  }).webp({ delay: [100, 100, 100], loop: 0 }).toBuffer();
   const meta = await sharp(animated, { animated: true }).metadata();
   assert.ok((meta.pages || 1) > 1, "fixture must be multi-frame");
 
