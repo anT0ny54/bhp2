@@ -130,7 +130,8 @@ export function isPrivateIp(value) {
 const PRIVATE_HOSTNAMES = new Set(["localhost", "localhost.localdomain", "local", "ip6-localhost", "ip6-loopback"]);
 function isPrivateHost(hostname) {
   const host = String(hostname).trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase().replace(/\.$/, "");
-  if (PRIVATE_HOSTNAMES.has(host)) return true;
+  // RFC 6761: every *.localhost name is loopback, whatever the resolver says.
+  if (PRIVATE_HOSTNAMES.has(host) || host.endsWith(".localhost")) return true;
   return net.isIP(host) ? isPrivateIp(host) : false;
 }
 
