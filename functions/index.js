@@ -1,36 +1,35 @@
 import http from "node:http";
 import https from "node:https";
 
-import {
-  INVALID_URL_ERROR,
-  PRIVATE_HOST_ERROR,
-  parseHttpUrl,
-  isPrivateHost,
-  resolveAndValidateRemoteUrl,
-  createPinnedLookup,
-} from "../util/validate.js";
+import { resolveAndValidateRemoteUrl, createPinnedLookup } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { BASE_HEADERS } from "../util/headers.js";
+import { BASE_HEADERS, createResponse } from "../util/headers.js";
 
+// Sharp's metadata().format values mapped to real media types. AVIF and HEIC
+// are both reported as "heif" and told apart by metadata().compression (see
+// getDetectedContentType below).
 const DETECTED_IMAGE_TYPES = Object.freeze({
   jpeg: "image/jpeg",
   png: "image/png",
   webp: "image/webp",
   gif: "image/gif",
   tiff: "image/tiff",
-  avif: "image/avif",
-  heif: "image/heif",
-  heic: "image/heic",
   jxl: "image/jxl",
+  svg: "image/svg+xml",
 });
+
+// Formats every Chromium-based browser (Bandwidth Guardian's targets) can
+// display. Untouched original bytes are only ever returned for WebP requests
+// when they are one of these; anything else (TIFF, HEIC, JXL, SVG, ...) is
+// always served as WebP, even when the WebP encoding is larger.
+const BROWSER_SAFE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/avif"]);
 
 const DEFAULT_QUALITY = 60;
 const DEFAULT_MAX_WIDTH = 0;
 const FETCH_TIMEOUT_MS = 8_000;
 // Socket inactivity timeout, deliberately shorter than the shared 8 s
-// deadline so slow-drip protection between bytes fires BEFORE the deadline
-// instead of being shadowed by it (previously both were 8 s and this timer
-// could never fire first).
+// deadline so slow-drip protection between bytes fires BEFORE the deadline.
+// It aborts the same controller as the deadline, so both report 504.
 const SOCKET_INACTIVITY_TIMEOUT_MS = 5_000;
 const MAX_REDIRECTS = 5;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -42,27 +41,63 @@ const SHARP_PROCESSING_TIMEOUT_SECONDS = 8;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_300_000;
+// Whole-request budget, measured from handler entry. No new fallback encode
+// starts after it, so an oversized image ends with a clear 504 instead of the
+// platform killing the function with an opaque gateway error.
+const REQUEST_BUDGET_MS = 20_000;
+// Fallback encodes allowed after the first (requested-settings) encode.
+const MAX_FALLBACK_ENCODES = 5;
+// Encoded size scales roughly with pixel area, i.e. with width squared. The
+// width estimate aims slightly below the cap so one probe usually suffices.
+const WIDTH_ESTIMATE_SAFETY = 0.85;
+// A fit below this fraction of the cap keeps searching for a wider one
+// (within the encode budget) instead of being accepted immediately.
+const UNDERSHOOT_RATIO = 0.25;
+
+// The upstream Accept header is fixed instead of forwarding the client's. The
+// response is cached publicly by query only, so a CDN that negotiates on
+// Accept must not hand one client's format (e.g. JPEG XL) to everyone else.
+// Re-encoded output is unaffected; this only matters for original bytes.
+const UPSTREAM_ACCEPT = "image/webp,image/avif,image/apng,image/png,image/jpeg,image/gif;q=0.9,image/*;q=0.8,*/*;q=0.5";
+const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36";
+// Pass-through request headers. Cookie is deliberately NOT forwarded: a
+// browser only sends the proxy origin's own cookies here, and forwarding them
+// to arbitrary upstream hosts would leak them. Referer is stripped on
+// cross-origin redirects.
+const FORWARDED_REQUEST_HEADERS = ["dnt", "referer"];
 
 // Browser cache is deliberately short-lived because extension settings are
 // encoded into the URL. Netlify's CDN keeps the expensive compressed result.
-const PUBLIC_CACHE_HEADERS = {
+const PUBLIC_CACHE_HEADERS = Object.freeze({
   "cache-control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800",
   "netlify-cdn-cache-control": "public, durable, s-maxage=2592000, stale-while-revalidate=604800",
   "netlify-vary": "query=url|quality|bw|jpeg|max_width|l",
-};
-
-const PRIVATE_CACHE_HEADERS = {
+});
+// Legacy clients that do not encode the upstream URL leak its query string
+// into the outer one as extra keys. Those keys are part of the image URL, so
+// such responses must vary on the whole query string.
+const LEGACY_PUBLIC_CACHE_HEADERS = Object.freeze({
+  ...PUBLIC_CACHE_HEADERS,
+  "netlify-vary": "query",
+});
+const PRIVATE_CACHE_HEADERS = Object.freeze({
   "cache-control": "private, no-store",
-};
+});
+const TEXT_ERROR_HEADERS = Object.freeze({
+  "content-type": "text/plain; charset=utf-8",
+  ...PRIVATE_CACHE_HEADERS,
+});
 
 // Runtime limits live in one frozen object so the integration tests can shrink
-// them (a 500 ms deadline instead of 8 s, a 2 KB output cap instead of 4.3 MB)
-// without touching the production defaults or exposing them to requests.
+// them without touching the production defaults or exposing them to requests.
 // Nothing in the request path can modify this; only configureForTests() can.
 const DEFAULT_SETTINGS = Object.freeze({
   fetchTimeoutMs: FETCH_TIMEOUT_MS,
+  socketTimeoutMs: SOCKET_INACTIVITY_TIMEOUT_MS,
   maxImageBytes: MAX_IMAGE_BYTES,
   maxOutputBytes: MAX_FUNCTION_OUTPUT_BYTES,
+  requestBudgetMs: REQUEST_BUDGET_MS,
   resolveRemoteUrl: resolveAndValidateRemoteUrl,
 });
 let settings = DEFAULT_SETTINGS;
@@ -93,26 +128,23 @@ async function getSharp() {
     return await sharpPromise;
   } catch (error) {
     sharpPromise = undefined;
-    const wrapped = new Error("Image processor is unavailable on the Netlify runtime.");
-    wrapped.statusCode = 503;
+    const wrapped = createHttpError(503, "Image processor is unavailable on the Netlify runtime.");
     wrapped.cause = error;
     throw wrapped;
   }
 }
 
-// user-agent and accept-language are handled with defaults in
-// buildUpstreamHeaders, so only the pass-through-only headers are listed here.
-const FORWARDED_REQUEST_HEADERS = ["cookie", "dnt", "referer"];
-
-function createResponse(statusCode, body = "", headers = {}) {
-  return {
-    statusCode,
-    headers: { ...BASE_HEADERS, ...headers },
-    body,
-  };
+function createHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 }
 
-function createBinaryResponse(buffer, headers = {}, cacheHeaders = PUBLIC_CACHE_HEADERS) {
+function createTimeoutError(message) {
+  return new DOMException(message, "TimeoutError");
+}
+
+function createBinaryResponse(buffer, headers, cacheHeaders) {
   return {
     statusCode: 200,
     isBase64Encoded: true,
@@ -125,41 +157,46 @@ function createBinaryResponse(buffer, headers = {}, cacheHeaders = PUBLIC_CACHE_
   };
 }
 
-function getQueryParameters(event) {
-  return event?.queryStringParameters || {};
-}
-
-// `url` is normally a single query-string value, but this also has to cope
-// with a legacy-client bug: extensions that build the proxy URL without
-// encodeURIComponent()-ing the upstream image URL will leak that upstream
-// URL's own "?a=b&c=d" query params into the *outer* query string. Netlify
-// then parses those as repeated `url` params (an array) or, in some
-// gateways, `value` itself arrives pre-joined as one string. Rejoining with
-// "&url=" reconstructs the original nested query string instead of only
-// keeping the first fragment before the unencoded "&". The JSON.parse branch
-// handles the same array shape when it arrives JSON-encoded instead.
-function getImageUrl(value) {
-  if (!value) return "";
-
-  if (Array.isArray(value)) return value.join("&url=");
-
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return parsed.join("&url=");
-    if (typeof parsed === "string") return parsed;
-    // Valid JSON that is neither a string nor an array (number, boolean,
-    // null) can never be an HTTP URL, but falling through to String(value)
-    // keeps the original text so parseHttpUrl rejects it with a proper 400
-    // instead of this branch silently inventing a different value.
-  } catch {
-    // Normal query-string URL.
+// Extracts the upstream image URL from the raw query string.
+//
+// Bandwidth Guardian (and every current client) sends
+// url=encodeURIComponent(imageUrl): the value cannot contain a raw "&", so it
+// ends at the next "&" and is decoded once.
+//
+// Legacy clients send the image URL unencoded. Its own "?a=b&c=d" query then
+// leaks into the outer query string as separate keys (`c`), which Netlify's
+// parsed queryStringParameters would silently drop. An unencoded value starts
+// with "http(s)://"; it is taken verbatim up to the first proxy parameter.
+//
+// Falls back to the parsed `url` parameter when no raw query is available.
+const PROXY_PARAMETER = /&(?:quality|l|bw|jpeg|max_width)=/;
+export function getImageUrl(event = {}) {
+  const raw = String(event.rawQuery ?? "").replace(/^\?/, "");
+  const match = /(?:^|&)url=/.exec(raw);
+  if (!match) {
+    const parsed = event.queryStringParameters?.url;
+    return { url: typeof parsed === "string" ? parsed : "", legacy: false };
   }
 
-  return String(value);
+  let value = raw.slice(match.index + match[0].length);
+  if (/^https?:\/\//i.test(value)) {
+    const end = value.search(PROXY_PARAMETER);
+    if (end >= 0) value = value.slice(0, end);
+    return { url: value, legacy: value.includes("&") };
+  }
+
+  const end = value.indexOf("&");
+  if (end >= 0) value = value.slice(0, end);
+  try {
+    // "+" is a space in query strings; encodeURIComponent never emits it.
+    return { url: decodeURIComponent(value.replace(/\+/g, " ")), legacy: false };
+  } catch {
+    return { url: value, legacy: false };
+  }
 }
 
 function normalizeImageUrl(value) {
-  const raw = getImageUrl(value)
+  const raw = value
     .trim()
     .replace(/^http:\/\/1\.1\.\d+\.\d+\/bmi\/(https?:\/\/)?/i, (_, scheme) => scheme || "http://");
 
@@ -189,62 +226,48 @@ function parseBoolean(value) {
   return value === "1" || value === "true";
 }
 
-// Client-supplied header names arrive with whatever casing the caller used.
-// Normalizing them once here means both the cookie check and the upstream
-// header builder below read from the same lower-cased view instead of each
-// re-scanning and re-lowercasing event.headers independently.
-function getNormalizedHeaders(event) {
-  const input = event?.headers || {};
-  return Object.fromEntries(
-    Object.entries(input).map(([name, value]) => [String(name).toLowerCase(), value]),
-  );
-}
-
-function buildUpstreamHeaders(normalized) {
-  const headers = {
-    accept: normalized.accept || "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    "accept-encoding": "identity",
-    "user-agent": normalized["user-agent"] ||
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-    "accept-language": normalized["accept-language"] || "en-US,en;q=0.9",
-  };
-
-  for (const name of FORWARDED_REQUEST_HEADERS) {
-    if (normalized[name]) headers[name] = normalized[name];
+// Header names arrive with whatever casing the caller used.
+function buildUpstreamHeaders(eventHeaders) {
+  const incoming = {};
+  for (const [name, value] of Object.entries(eventHeaders || {})) {
+    incoming[String(name).toLowerCase()] = value;
   }
 
+  const headers = {
+    accept: UPSTREAM_ACCEPT,
+    "accept-encoding": "identity",
+    "user-agent": incoming["user-agent"] || DEFAULT_USER_AGENT,
+    "accept-language": incoming["accept-language"] || "en-US,en;q=0.9",
+  };
+  for (const name of FORWARDED_REQUEST_HEADERS) {
+    if (incoming[name]) headers[name] = incoming[name];
+  }
   return headers;
 }
 
-function hasCredentials(normalized) {
-  return Boolean(normalized.cookie);
-}
-
 // Node's native http/https request supports a custom `lookup` in its options
-// object, so the socket can be pinned to the DNS-validated addresses directly
+// object, so the socket is pinned to the DNS-validated addresses directly
 // through a first-class, documented API — no third-party dispatcher involved.
-// This replaces the previous undici Agent approach, which failed in
-// production with opaque undici "fetch failed" connector errors on some
-// Netlify runtimes (npm-undici vs. Node's built-in fetch interop under
-// esbuild bundling). The DNS pinning guarantees are identical: the pinned
-// lookup only ever answers with the addresses that
+// The pinned lookup only ever answers with the addresses that
 // resolveAndValidateRemoteUrl already checked.
-function requestPinned(urlString, upstreamHeaders, lookup, signal, socketTimeoutMs) {
+//
+// Both the shared deadline and the socket inactivity timer go through the
+// same controller, so a stall before headers, between bytes or mid-body is
+// always classified the same way (504).
+function requestPinned(target, upstreamHeaders, lookup, controller, socketTimeoutMs) {
   return new Promise((resolve, reject) => {
+    const { signal } = controller;
     // Never initiate a new upstream request once the shared deadline has fired.
     if (signal.aborted) {
       reject(signal.reason);
       return;
     }
-    const target = new URL(urlString);
     const transport = target.protocol === "https:" ? https : http;
     let request;
-    // The abort listener must be removed when the exchange finishes, not only
-    // when it fires: { once: true } alone leaks one stale listener per
-    // redirect hop on the success path. The response "close" event covers
-    // normal body completion AND any mid-body destroy() (including aborts),
-    // so the shared deadline stays armed for the whole download.
-    const onAbort = () => request?.destroy(signal.reason);
+    // The listener is removed when the exchange finishes, not only when it
+    // fires; the response "close" event covers normal body completion AND any
+    // mid-body destroy(), so the deadline stays armed for the whole download.
+    const onAbort = () => request.destroy(signal.reason);
     const cleanup = () => signal.removeEventListener("abort", onAbort);
 
     try {
@@ -258,35 +281,20 @@ function requestPinned(urlString, upstreamHeaders, lookup, signal, socketTimeout
         resolve(response);
       });
     } catch (error) {
-      cleanup();
       reject(error);
       return;
     }
 
+    signal.addEventListener("abort", onAbort, { once: true });
     request.on("error", (error) => {
       cleanup();
       reject(error);
     });
-
-    // Socket inactivity timeout; resets on activity, so a slow-drip upstream
-    // cannot stall forever even between bytes.
+    // Resets on activity, so a slow-drip upstream cannot stall between bytes.
     request.setTimeout(socketTimeoutMs, () => {
-      request.destroy(Object.assign(
-        new Error("Upstream socket timed out."),
-        { name: "AbortError" },
-      ));
+      controller.abort(createTimeoutError("Upstream socket timed out."));
     });
-
-    // One deadline covers every hop AND the body download.
-    if (signal.aborted) onAbort();
-    else signal.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function createHttpError(statusCode, message) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  return error;
 }
 
 async function readLimitedBody(response, maxBytes) {
@@ -309,43 +317,55 @@ async function readLimitedBody(response, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
+function resolveRedirect(location, base) {
+  let next;
+  try {
+    next = new URL(location, base);
+  } catch {
+    throw createHttpError(502, "Upstream sent an invalid redirect location.");
+  }
+  if (next.protocol !== "http:" && next.protocol !== "https:") {
+    throw createHttpError(502, "Upstream sent an invalid redirect location.");
+  }
+  return next;
+}
+
 // Internal to this module (tests exercise it through handler()).
-async function fetchImage(normalizedHeaders, initialUrl) {
-  const { fetchTimeoutMs, maxImageBytes, resolveRemoteUrl } = settings;
+async function fetchImage(eventHeaders, initialUrl) {
+  const { fetchTimeoutMs, socketTimeoutMs: socketTimeoutSetting, maxImageBytes, resolveRemoteUrl } = settings;
   let currentUrl = initialUrl;
-  // Forwarded request headers don't change across hops, except that
-  // credentials are dropped when a redirect leaves the original origin.
-  let upstreamHeaders = buildUpstreamHeaders(normalizedHeaders);
+  // Forwarded request headers don't change across hops, except that Referer
+  // is dropped when a redirect leaves the original origin.
+  let upstreamHeaders = buildUpstreamHeaders(eventHeaders);
   const controller = new AbortController();
-  // One deadline covers every hop AND the body download, so a slow-drip
-  // upstream can't outlive the timeout once its headers have arrived.
-  const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
+  // One deadline covers DNS, every hop AND the body download.
+  const timer = setTimeout(
+    () => controller.abort(createTimeoutError("Upstream image request timed out.")),
+    fetchTimeoutMs,
+  );
+  // Tests shrink fetchTimeoutMs below the production inactivity timeout; the
+  // socket timer must never outlive the shared deadline it backs up.
+  const socketTimeoutMs = Math.min(socketTimeoutSetting, fetchTimeoutMs);
 
   try {
     for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-      // The deadline is checked before every hop, and the DNS step observes the
-      // same signal, so a stalled resolver cannot outlive the 8 s budget or let
-      // a later hop start after it.
+      // Checked before every hop; the DNS step observes the same signal, and
+      // requestPinned re-checks it before opening a socket.
       controller.signal.throwIfAborted();
+      // Every hop, including the first, is URL-checked, DNS-resolved and
+      // address-checked here (400 for invalid URLs, 403 for private targets).
       const validation = await resolveRemoteUrl(currentUrl, { signal: controller.signal });
       if (!validation.valid) {
-        const error = new Error(validation.error);
-        error.statusCode = validation.statusCode || 403;
-        throw error;
+        throw createHttpError(validation.statusCode || 403, validation.error);
       }
 
-      // Parse once per hop; the origin comparison in the redirect branch used
-      // to re-parse validation.url on every cross-origin redirect.
-      const validatedUrl = new URL(validation.url);
-      const validatedOrigin = validatedUrl.origin;
-
-      controller.signal.throwIfAborted();
+      const target = new URL(validation.url);
       const upstream = await requestPinned(
-        validation.url,
+        target,
         upstreamHeaders,
         createPinnedLookup(validation.addresses),
-        controller.signal,
-        socketTimeout(fetchTimeoutMs),
+        controller,
+        socketTimeoutMs,
       );
 
       const location = upstream.headers.location;
@@ -353,25 +373,11 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       if (status >= 300 && status < 400 && location) {
         // agent:false, so destroying the response closes the socket.
         upstream.destroy();
-        if (redirect === MAX_REDIRECTS) {
-          const error = new Error("Too many upstream redirects.");
-          error.statusCode = 508;
-          throw error;
-        }
-        let next;
-        try {
-          next = new URL(location, validatedUrl);
-        } catch {
-          const error = new Error("Upstream sent an invalid redirect location.");
-          error.statusCode = 502;
-          throw error;
-        }
-        if (next.protocol !== "http:" && next.protocol !== "https:") {
-          throw createHttpError(502, "Upstream sent an invalid redirect location.");
-        }
-        if (next.origin !== validatedOrigin) {
-          const { cookie, referer, ...withoutCredentials } = upstreamHeaders;
-          upstreamHeaders = withoutCredentials;
+        if (redirect === MAX_REDIRECTS) throw createHttpError(508, "Too many upstream redirects.");
+        const next = resolveRedirect(location, target);
+        if (next.origin !== target.origin) {
+          const { referer, ...withoutReferer } = upstreamHeaders;
+          upstreamHeaders = withoutReferer;
         }
         currentUrl = next.toString();
         continue;
@@ -379,9 +385,10 @@ async function fetchImage(normalizedHeaders, initialUrl) {
 
       if (status < 200 || status >= 300) {
         upstream.destroy();
-        const error = new Error(`Upstream image request failed with status ${status}.`);
-        error.statusCode = status >= 400 && status <= 599 ? status : 502;
-        throw error;
+        throw createHttpError(
+          status >= 400 && status <= 599 ? status : 502,
+          `Upstream image request failed with status ${status}.`,
+        );
       }
 
       const contentType = String(upstream.headers["content-type"] || "")
@@ -389,13 +396,11 @@ async function fetchImage(normalizedHeaders, initialUrl) {
         .trim()
         .toLowerCase();
 
-      // Keep compatibility with CDNs that omit Content-Type. Sharp will validate
-      // the actual bytes below. Explicit non-image responses are rejected early.
+      // Keep compatibility with CDNs that omit Content-Type. Sharp validates
+      // the actual bytes later. Explicit non-image responses are rejected early.
       if (contentType && !contentType.startsWith("image/")) {
         upstream.destroy();
-        const error = new Error(`Upstream returned a non-image response (${contentType}).`);
-        error.statusCode = 415;
-        throw error;
+        throw createHttpError(415, `Upstream returned a non-image response (${contentType}).`);
       }
 
       return {
@@ -405,21 +410,18 @@ async function fetchImage(normalizedHeaders, initialUrl) {
       };
     }
   } catch (error) {
-    // When the shared deadline fires mid-body, Node surfaces the destroyed
-    // socket as a plain ECONNRESET ("aborted") rather than an AbortError, so
-    // the controller's own state is the reliable signal for a timeout.
-    if (error?.name === "AbortError" ||
-        (controller.signal.aborted && !Number.isInteger(error?.statusCode))) {
+    // The controller is aborted by the deadline AND by the socket inactivity
+    // timer. A destroyed socket can surface as a plain ECONNRESET ("aborted"),
+    // so the controller's own state is the reliable timeout signal.
+    if (controller.signal.aborted && !Number.isInteger(error?.statusCode)) {
       throw createHttpError(504, "Upstream image request timed out.");
     }
-    // Connector-level failures (ECONNREFUSED, ENETUNREACH, TLS errors, DNS
-    // rebinding caught late) mean the upstream could not be reached at all.
-    // Report them as gateway errors with the underlying code so a broken
-    // deployment is diagnosable from the response body and the logs.
+    // Connector-level failures (ECONNREFUSED, ENETUNREACH, TLS errors) mean the
+    // upstream could not be reached at all. Report them as gateway errors with
+    // the underlying code so a broken deployment is diagnosable.
     if (error && !Number.isInteger(error.statusCode)) {
       const code = error.code ? ` [${error.code}]` : "";
-      const gateway = new Error(`Upstream connection failed${code}.`);
-      gateway.statusCode = 502;
+      const gateway = createHttpError(502, `Upstream connection failed${code}.`);
       gateway.cause = error;
       throw gateway;
     }
@@ -427,12 +429,6 @@ async function fetchImage(normalizedHeaders, initialUrl) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-// Tests shrink fetchTimeoutMs below the production inactivity timeout; the
-// socket timer must never outlive the shared deadline it backs up.
-function socketTimeout(fetchTimeoutMs) {
-  return Math.min(SOCKET_INACTIVITY_TIMEOUT_MS, fetchTimeoutMs);
 }
 
 function getSafeUpstreamHeaders(headers) {
@@ -451,8 +447,7 @@ function isTimeoutError(error) {
 }
 
 // Every decode uses the same safety options; building the instance in one
-// place keeps them from drifting apart (animated input is only ever enabled
-// for the WebP pipeline and metadata probes, never for JPEG output).
+// place keeps them from drifting apart.
 async function createSharpPipeline(input, animated) {
   const sharp = await getSharp();
   return sharp(input, {
@@ -462,37 +457,55 @@ async function createSharpPipeline(input, animated) {
   }).timeout({ seconds: SHARP_PROCESSING_TIMEOUT_SECONDS });
 }
 
-async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
+// Header-only probe, done once per request. Its result drives the animated
+// passthrough, the original-bytes media type and the WebP encoder options.
+async function probeImage(buffer) {
+  return (await createSharpPipeline(buffer, true)).metadata();
+}
+
+function getDetectedContentType(metadata) {
+  if (metadata.format === "heif") {
+    return metadata.compression === "av1" ? "image/avif" : "image/heic";
+  }
+  return DETECTED_IMAGE_TYPES[metadata.format] || "";
+}
+
+// Returns { data, info }; info.width is the actual output (frame) width.
+async function encodeImage(input, { useWebp, grayscale, quality, width, animated }) {
   // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
   // JPEG cannot. Never silently turn an animated image into a single frame.
   let pipeline = (await createSharpPipeline(input, useWebp)).rotate();
 
-  if (maxWidth > 0) {
-    pipeline = pipeline.resize({ width: maxWidth, fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true });
+  if (width > 0) {
+    pipeline = pipeline.resize({ width, fit: "inside", withoutEnlargement: true });
   }
   if (grayscale) pipeline = pipeline.grayscale();
 
-  return useWebp
-    ? pipeline.webp({
-        quality,
-        // Effort 4 is a balanced speed/size trade-off for serverless CPU budgets.
-        effort: 4,
-        smartSubsample: true,
-        minSize: true,
-        mixed: true,
-      }).toBuffer()
-    : pipeline
-        // JPEG has no alpha channel; compositing transparency onto white
-        // instead of letting Sharp implicitly drop the alpha avoids black or
-        // broken-looking transparent regions in PNG/WebP sources.
-        .flatten({ background: "#ffffff" })
-        .jpeg({
-          quality,
-          progressive: true,
-          mozjpeg: true,
-          chromaSubsampling: "4:2:0",
-        })
-        .toBuffer();
+  if (useWebp) {
+    return pipeline.webp({
+      quality,
+      // Effort 4 is a balanced speed/size trade-off for serverless CPU budgets.
+      effort: 4,
+      smartSubsample: true,
+      // `mixed` only affects animations. `minSize` is not used: it is
+      // animation-only too and made animated encodes ~3x slower for the
+      // same output size in local measurements.
+      ...(animated ? { mixed: true } : {}),
+    }).toBuffer({ resolveWithObject: true });
+  }
+
+  return pipeline
+    // JPEG has no alpha channel; compositing transparency onto white
+    // instead of letting Sharp implicitly drop the alpha avoids black or
+    // broken-looking transparent regions in PNG/WebP sources.
+    .flatten({ background: "#ffffff" })
+    .jpeg({
+      quality,
+      progressive: true,
+      mozjpeg: true,
+      chromaSubsampling: "4:2:0",
+    })
+    .toBuffer({ resolveWithObject: true });
 }
 
 // Fallback widths, widest first. The ladder deliberately continues far below
@@ -501,11 +514,9 @@ const FALLBACK_WIDTH_LADDER = Object.freeze([
   4096, 3072, 2048, 1600, 1280, 960, 640, 320, 240, 160, 120, 80, 64, 48, 32, 16,
 ]);
 
-// Widths to try, in order, once lowering quality alone was not enough. Only
-// widths strictly below a requested max_width are used (the requested width
-// itself was already tried by the quality loop), so a request such as
-// max_width=100 or 320 still gets smaller sizes instead of an empty list.
-// Combined with `withoutEnlargement` at encode time this never enlarges an image.
+// Widths strictly below a requested max_width (the requested width itself is
+// tried first), so max_width=100 or 320 still gets smaller sizes instead of an
+// empty list. Combined with `withoutEnlargement` this never enlarges an image.
 export function buildFallbackWidths(maxWidth) {
   const ceiling = maxWidth > 0 ? maxWidth : Number.POSITIVE_INFINITY;
   const widths = FALLBACK_WIDTH_LADDER.filter((width) => width < ceiling);
@@ -518,14 +529,28 @@ export function buildFallbackWidths(maxWidth) {
   return widths;
 }
 
-// Preserve a client's low requested quality during the width fallback. The
-// codec-specific floor is intended to prevent wasteful quality searches, not
-// to increase quality above the original request (e.g. JPEG quality=5).
-export function getFallbackQuality(quality, useWebp) {
-  const floor = useWebp ? 10 : 20;
-  return Math.min(quality, Math.max(floor, Math.floor(quality / 2)));
+// Codec-specific floor for the fallback quality. It prevents pointless
+// near-zero-quality encodes but never raises a low requested quality.
+function getQualityFloor(useWebp) {
+  return useWebp ? 10 : 20;
 }
 
+export function getFallbackQuality(quality, useWebp) {
+  return Math.min(quality, Math.max(getQualityFloor(useWebp), Math.floor(quality / 2)));
+}
+
+// Encodes with the requested settings first. Only when Netlify's buffered
+// response ceiling would be exceeded does it fall back, using at most
+// MAX_FALLBACK_ENCODES extra encodes and never starting one after `deadline`:
+//   1. one encode at the fallback quality and the same width;
+//   2. width probes chosen by a size model instead of a blind search. Encoded
+//      size is modelled as size ∝ width^k: k starts at 2 (pixel area) and is
+//      re-fitted from the last two measurements, because downscaling also
+//      removes detail and size often falls faster than area. Each probe is a
+//      ladder rung strictly between the widest known fit and the narrowest
+//      known miss, so the search always narrows and terminates.
+// A fit at or above UNDERSHOOT_RATIO of the cap is accepted immediately;
+// otherwise the widest fit found within the encode budget is returned.
 export async function compressImage(
   input,
   useWebp,
@@ -533,62 +558,68 @@ export async function compressImage(
   quality,
   maxWidth,
   maxOutputBytes = settings.maxOutputBytes,
+  { animated = false, deadline = Number.POSITIVE_INFINITY } = {},
 ) {
-  let output = await encodeImage(input, useWebp, grayscale, quality, maxWidth);
-  if (output.length <= maxOutputBytes) return output;
+  const encode = (q, width) => encodeImage(input, { useWebp, grayscale, quality: q, width, animated });
 
-  // Keep the requested settings as the first choice. Only enter this fallback
-  // when Netlify's buffered-response ceiling would otherwise be exceeded.
-  for (let q = quality - 10; q >= (useWebp ? 10 : 20); q -= 10) {
-    output = await encodeImage(input, useWebp, grayscale, q, maxWidth);
-    if (output.length <= maxOutputBytes) return output;
+  let result = await encode(quality, maxWidth);
+  if (result.data.length <= maxOutputBytes) return result.data;
+
+  let fallbackEncodes = 0;
+  const canEncode = () => fallbackEncodes < MAX_FALLBACK_ENCODES && Date.now() < deadline;
+  const encodeFallback = (q, width) => {
+    fallbackEncodes += 1;
+    return encode(q, width);
+  };
+  const budgetError = () =>
+    createHttpError(504, "Image processing exceeded the request time budget.");
+
+  const fallbackQuality = getFallbackQuality(quality, useWebp);
+  if (fallbackQuality < quality) {
+    if (!canEncode()) throw budgetError();
+    result = await encodeFallback(fallbackQuality, maxWidth);
+    if (result.data.length <= maxOutputBytes) return result.data;
   }
 
-  // If quality alone is insufficient, reduce dimensions. Encoded size usually
-  // trends down with width, so binary search keeps the common case to
-  // ceil(log2(n)) encodes instead of trying every rung. The relationship is
-  // not guaranteed to be strictly monotonic for every codec and image, so a
-  // successful probe is always checked against the cap and a no-fit search
-  // scans unprobed rungs before returning 413. This protects the response-size
-  // limit without making every normal request pay for a linear search.
-  // The ladder quality follows the REQUESTED quality (halved, with a floor)
-  // instead of a hardcoded 30/45, so high-quality requests don't silently
-  // receive the minimum.
-  const ladderQuality = getFallbackQuality(quality, useWebp);
-  const widths = buildFallbackWidths(maxWidth);
-  let lo = 0;
-  let hi = widths.length - 1;
-  let best = -1;
-  const probedOutputs = new Map();
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    output = await encodeImage(input, useWebp, grayscale, ladderQuality, widths[mid]);
-    probedOutputs.set(mid, output);
-    if (output.length <= maxOutputBytes) {
-      best = mid;
-      hi = mid - 1;
+  const ladder = buildFallbackWidths(maxWidth);
+  let missWidth = result.info.width; // narrowest width known NOT to fit
+  let fitWidth = 0; // widest width known to fit
+  let best = null;
+  let last = { width: result.info.width, size: result.data.length };
+  let previous = null;
+
+  while (true) {
+    const candidates = ladder.filter((w) => w > fitWidth && w < missWidth);
+    if (candidates.length === 0) break;
+    if (!canEncode()) {
+      // Out of time with nothing usable is a timeout; out of encodes is a 413.
+      if (!best && Date.now() >= deadline) throw budgetError();
+      break;
+    }
+
+    let exponent = 2;
+    if (previous && previous.width !== last.width && previous.size !== last.size) {
+      const fitted = Math.log(previous.size / last.size) / Math.log(previous.width / last.width);
+      if (Number.isFinite(fitted)) exponent = Math.min(Math.max(fitted, 1), 4);
+    }
+    const estimate = last.width * (maxOutputBytes / last.size) ** (1 / exponent) * WIDTH_ESTIMATE_SAFETY;
+    const width = candidates.find((w) => w <= estimate) ?? candidates[candidates.length - 1];
+
+    const probe = await encodeFallback(fallbackQuality, width);
+    const probeWidth = Math.min(width, probe.info.width);
+    if (probe.data.length <= maxOutputBytes) {
+      best = probe.data;
+      fitWidth = width;
+      if (probe.data.length >= maxOutputBytes * UNDERSHOOT_RATIO) return best;
     } else {
-      lo = mid + 1;
+      missWidth = width;
     }
-  }
-  if (best >= 0) return probedOutputs.get(best);
-
-  // Encoded size usually trends down with width, but codecs and image content
-  // do not guarantee strict monotonicity. If binary search found no fit, check
-  // every unprobed rung before returning 413 so a non-monotonic size curve
-  // cannot turn a viable image into a false failure. Reuse prior probes.
-  for (let i = 0; i < widths.length; i += 1) {
-    output = probedOutputs.get(i);
-    if (!output) {
-      output = await encodeImage(input, useWebp, grayscale, ladderQuality, widths[i]);
-      probedOutputs.set(i, output);
-    }
-    if (output.length <= maxOutputBytes) return output;
+    previous = last;
+    last = { width: probeWidth, size: probe.data.length };
   }
 
-  const error = new Error("The optimized image is too large for the proxy response limit.");
-  error.statusCode = 413;
-  throw error;
+  if (best) return best;
+  throw createHttpError(413, "The optimized image is too large for the proxy response limit.");
 }
 
 function getOutputHeaders(contentType, originalSize, compressedSize) {
@@ -610,18 +641,8 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
   };
 }
 
-async function getDetectedImageContentType(buffer) {
-  try {
-    const metadata = await (await createSharpPipeline(buffer, true)).metadata();
-    return DETECTED_IMAGE_TYPES[metadata.format] || "application/octet-stream";
-  } catch (error) {
-    if (isTimeoutError(error)) throw error;
-    return "application/octet-stream";
-  }
-}
-
-// Returns the upstream bytes untouched. Both the animated-JPEG passthrough and
-// the never-enlarge fallback use this. Because the response is base64 encoded,
+// Returns the upstream bytes untouched (animated jpeg=1 passthrough and the
+// WebP never-enlarge fallback). Because the response is base64 encoded,
 // untouched bytes above the safety target would exceed Netlify's 6 MB buffered
 // limit and fail as an opaque gateway error, so report a clear 413 instead.
 function createOriginalResponse(source, contentType, cacheHeaders) {
@@ -640,6 +661,7 @@ function createOriginalResponse(source, contentType, cacheHeaders) {
 }
 
 export async function handler(event = {}) {
+  const startedAt = Date.now();
   const method = event.httpMethod || "GET";
 
   if (method === "OPTIONS") {
@@ -649,68 +671,45 @@ export async function handler(event = {}) {
   if (method !== "GET") {
     return createResponse(405, "Method Not Allowed", {
       allow: "GET, OPTIONS",
-      "content-type": "text/plain; charset=utf-8",
-      ...PRIVATE_CACHE_HEADERS,
+      ...TEXT_ERROR_HEADERS,
     });
   }
 
-  const query = getQueryParameters(event);
-  if (!query.url) {
+  const query = event.queryStringParameters || {};
+  const { url: rawImageUrl, legacy } = getImageUrl(event);
+  if (!rawImageUrl) {
     return createResponse(200, "bandwidth-hero-proxy", {
       "content-type": "text/plain; charset=utf-8",
       "cache-control": "public, max-age=300",
     });
   }
 
-  const imageUrl = normalizeImageUrl(query.url);
-  const initial = parseHttpUrl(imageUrl);
-  if (!initial) {
-    return createResponse(400, INVALID_URL_ERROR, {
-      "content-type": "text/plain; charset=utf-8",
-      ...PRIVATE_CACHE_HEADERS,
-    });
-  }
-
-  if (isPrivateHost(initial.hostname)) {
-    // Same policy rejection as the DNS-validated path: 403, not 400 (the
-    // request is well-formed; the target is forbidden).
-    return createResponse(403, PRIVATE_HOST_ERROR, {
-      "content-type": "text/plain; charset=utf-8",
-      ...PRIVATE_CACHE_HEADERS,
-    });
-  }
-
-  const useWebp = query.jpeg !== "1";
+  // WebP is the default output; only an explicit jpeg=1 / jpeg=true selects JPEG.
+  const useWebp = !parseBoolean(query.jpeg);
   const grayscale = parseBoolean(query.bw);
   // `??` (not `||`): quality=0 is a present value and must clamp to 1 instead
   // of falling through to the legacy alias/default like an absent parameter.
   const quality = parseInteger(query.quality ?? query.l, DEFAULT_QUALITY, 1, 100);
   const maxWidth = parseInteger(query.max_width, DEFAULT_MAX_WIDTH, 0, 8192);
-  const normalizedHeaders = getNormalizedHeaders(event);
-  const cacheHeaders = hasCredentials(normalizedHeaders) ? PRIVATE_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
+  const cacheHeaders = legacy ? LEGACY_PUBLIC_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
 
   try {
-    const source = await fetchImage(normalizedHeaders, initial.toString());
+    const source = await fetchImage(event.headers, normalizeImageUrl(rawImageUrl));
     const originalSize = source.buffer.length;
+    const metadata = await probeImage(source.buffer);
+    const animated = (metadata.pages || 1) > 1;
+    const detectedType = getDetectedContentType(metadata);
 
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
-    // APNG and animated AVIF/HEIF are served with ordinary image/png |
-    // image/avif Content-Types, so filtering by Content-Type cannot catch
-    // them — probe the bytes of EVERY jpeg=1 source for multiple frames.
-    if (!useWebp) {
-      try {
-        const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
-        if ((metadata.pages || 1) > 1) {
-          const type = source.contentType || DETECTED_IMAGE_TYPES[metadata.format] || "application/octet-stream";
-          return createOriginalResponse(source, type, cacheHeaders);
-        }
-      } catch (error) {
-        // An undecodable body with a declared image type is reported by the
-        // compression step below; service-limit errors and processing timeouts
-        // are final and must not be swallowed by this metadata probe.
-        if (Number.isInteger(error?.statusCode) || isTimeoutError(error)) throw error;
-      }
+    // The probe reads the bytes, so APNG and animated AVIF/HEIF served with an
+    // ordinary image/png | image/avif Content-Type are detected too.
+    if (!useWebp && animated) {
+      return createOriginalResponse(
+        source,
+        detectedType || source.contentType || "application/octet-stream",
+        cacheHeaders,
+      );
     }
 
     const compressed = await compressImage(
@@ -719,36 +718,34 @@ export async function handler(event = {}) {
       grayscale,
       quality,
       maxWidth,
+      settings.maxOutputBytes,
+      { animated, deadline: startedAt + settings.requestBudgetMs },
     );
 
-    if (useWebp && compressed.length >= originalSize) {
-      // For WebP requests, never make a client pay for a larger representation:
-      // preserve the original bytes AND a real media type. Explicit jpeg=1 is a
-      // format request, so honor it for static images even when JPEG is larger
-      // than the source. Some CDNs omit Content-Type, so detect the format only
-      // on this uncommon WebP fallback path.
-      const originalContentType =
-        source.contentType || await getDetectedImageContentType(source.buffer);
-      return createOriginalResponse(source, originalContentType, cacheHeaders);
+    // Never make a WebP client pay for a larger representation, but only fall
+    // back to formats every Chromium browser displays; anything else stays
+    // WebP. Explicit jpeg=1 is a format request and is always honored for
+    // static images.
+    if (useWebp && compressed.length >= originalSize && BROWSER_SAFE_TYPES.has(detectedType)) {
+      return createOriginalResponse(source, detectedType, cacheHeaders);
     }
 
-    const outputType = useWebp ? "image/webp" : "image/jpeg";
     return createBinaryResponse(
       compressed,
-      getOutputHeaders(outputType, originalSize, compressed.length),
+      getOutputHeaders(useWebp ? "image/webp" : "image/jpeg", originalSize, compressed.length),
       cacheHeaders,
     );
   } catch (error) {
-    console.error("Image proxy error:", error?.message || error, error?.cause || "");
     // Sharp versions can report a processing timeout by name or by message;
     // classify both forms as 504 instead of a generic 500.
     const statusCode = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599
       ? error.statusCode
       : isTimeoutError(error) ? 504 : 500;
-    const message = error?.message || "Image processing failed.";
-    return createResponse(statusCode, message, {
-      "content-type": "text/plain; charset=utf-8",
-      ...PRIVATE_CACHE_HEADERS,
-    });
+    // Client-side and upstream 4xx outcomes (invalid URL, private host, 404...)
+    // are expected traffic; only server-side failures are logged.
+    if (statusCode >= 500) {
+      console.error("Image proxy error:", error?.message || error, error?.cause || "");
+    }
+    return createResponse(statusCode, error?.message || "Image processing failed.", TEXT_ERROR_HEADERS);
   }
 }

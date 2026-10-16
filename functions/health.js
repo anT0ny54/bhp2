@@ -1,23 +1,12 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { BASE_HEADERS } from "../util/headers.js";
+import { createResponse } from "../util/headers.js";
 
-const HEALTH_HEADERS = {
-  "content-type": "application/json; charset=utf-8",
-  "cache-control": "no-store",
-};
-
-function createResponse(statusCode, body = "", headers = {}) {
-  return {
-    statusCode,
-    headers: { ...BASE_HEADERS, ...headers },
-    body,
-  };
-}
+const NO_STORE = { "cache-control": "no-store" };
 
 export async function handler(event = {}) {
   const method = event.httpMethod || "GET";
   if (method === "OPTIONS") {
-    return createResponse(204, "", { "cache-control": "no-store" });
+    return createResponse(204, "", NO_STORE);
   }
   if (method !== "GET") {
     // Error responses are plain text per docs/backend-contract.md, matching
@@ -25,11 +14,11 @@ export async function handler(event = {}) {
     return createResponse(405, "Method Not Allowed", {
       allow: "GET, OPTIONS",
       "content-type": "text/plain; charset=utf-8",
-      "cache-control": "no-store",
+      ...NO_STORE,
     });
   }
 
-  let sharpStatus = { available: false };
+  let sharpStatus;
   try {
     const module = await import("sharp");
     const sharp = module.default || module;
@@ -55,6 +44,6 @@ export async function handler(event = {}) {
       sharp: sharpStatus,
       features: FEATURES,
     }),
-    HEALTH_HEADERS,
+    { "content-type": "application/json; charset=utf-8", ...NO_STORE },
   );
 }
