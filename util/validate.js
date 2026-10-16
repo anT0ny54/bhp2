@@ -3,16 +3,8 @@ import net from "node:net";
 
 export const INVALID_URL_ERROR = "Invalid URL. Only HTTP and HTTPS URLs are supported.";
 export const PRIVATE_HOST_ERROR = "Requests to private or local addresses are not allowed.";
-export const DNS_RESOLUTION_ERROR = "Unable to resolve the remote host.";
+const DNS_RESOLUTION_ERROR = "Unable to resolve the remote host.";
 const DNS_LOOKUP_TIMEOUT_MS = 2_000;
-
-let dnsLookup = defaultDnsLookup;
-async function defaultDnsLookup(hostname) {
-  return dns.lookup(hostname, { all: true, verbatim: true });
-}
-
-export function setDnsLookupForTests(lookup) { dnsLookup = lookup; }
-export function resetDnsLookupForTests() { dnsLookup = defaultDnsLookup; }
 
 // ---------------------------------------------------------------------------
 // Address policy
@@ -75,11 +67,9 @@ function buildBlockList(entries, family) {
 const BLOCKED_IPV4 = buildBlockList(BLOCKED_IPV4_CIDRS, "ipv4");
 const BLOCKED_IPV6 = buildBlockList(BLOCKED_IPV6_CIDRS, "ipv6");
 
+// Callers only pass strings that net.isIP() classified as IPv4 or dotted
+// quads built from 16-bit groups, so no further format check is needed.
 function isPrivateIpv4(value) {
-  // Callers pass a string that net.isIP() already classified as IPv4; the
-  // format check is kept so malformed input fails closed.
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return true;
-  if (value.split(".").some((part) => Number(part) > 255)) return true;
   return BLOCKED_IPV4.check(value, "ipv4");
 }
 
@@ -104,8 +94,9 @@ function expandIpv6(value) {
 }
 
 function isPrivateIpv6(value) {
+  // expandIpv6 returns exactly 8 groups or null; null fails closed.
   const groups = expandIpv6(value);
-  if (!groups || groups.length !== 8) return true;
+  if (!groups) return true;
   const toIpv4 = (high, low) => [high >>> 8, high & 255, low >>> 8, low & 255].join(".");
 
   // IPv4-mapped (::ffff:0:0/96), NAT64 (64:ff9b::/96) and 6to4 (2002::/16)
@@ -137,13 +128,13 @@ export function isPrivateIp(value) {
 }
 
 const PRIVATE_HOSTNAMES = new Set(["localhost", "localhost.localdomain", "local", "ip6-localhost", "ip6-loopback"]);
-export function isPrivateHost(hostname) {
+function isPrivateHost(hostname) {
   const host = String(hostname).trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase().replace(/\.$/, "");
   if (PRIVATE_HOSTNAMES.has(host)) return true;
   return net.isIP(host) ? isPrivateIp(host) : false;
 }
 
-export function parseHttpUrl(value) {
+function parseHttpUrl(value) {
   try {
     const url = new URL(value);
     if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) return null;
@@ -151,15 +142,14 @@ export function parseHttpUrl(value) {
   } catch { return null; }
 }
 
-// Internal building block of resolveAndValidateRemoteUrl(). Not exported:
-// the pre-fetch check in functions/index.js uses parseHttpUrl + isPrivateHost
-// directly, so an exported copy here would be a dead public API that can drift
-// from the DNS-validated path.
+// Internal building block of resolveAndValidateRemoteUrl(). Every hop,
+// including the first, goes through it, so the proxy has exactly one
+// URL/literal-host policy path instead of a separate pre-fetch copy.
 function validateRemoteUrl(value) {
   const url = parseHttpUrl(value);
   if (!url) return { valid: false, error: INVALID_URL_ERROR, statusCode: 400 };
   if (isPrivateHost(url.hostname)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
-  return { valid: true, url: url.toString() };
+  return { valid: true, url: url.toString(), hostname: url.hostname };
 }
 
 // `options.signal` is the caller's shared deadline. When it fires, the DNS
@@ -175,13 +165,14 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
 
   // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"),
   // which getaddrinfo cannot resolve. Strip them so public IPv6 literals work.
-  const hostname = new URL(validation.url).hostname.replace(/^\[|\]$/g, "");
+  const hostname = validation.hostname.replace(/^\[|\]$/g, "");
   let records;
   let timer;
   let onAbort;
   try {
     records = await Promise.race([
-      dnsLookup(hostname),
+      // `order: "verbatim"` replaces the deprecated `verbatim: true` option.
+      dns.lookup(hostname, { all: true, order: "verbatim" }),
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), timeoutMs);
       }),
@@ -217,7 +208,8 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
   // private address in the gap between this check and the connection
   // (TOCTOU DNS rebinding) even though this lookup was clean.
   return {
-    ...validation,
+    valid: true,
+    url: validation.url,
     addresses: records.map(({ address, family }) => ({ address, family })),
   };
 }
