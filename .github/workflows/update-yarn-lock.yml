@@ -53,7 +53,7 @@ jobs:
           yarn run check:sharp-pins
 
       - name: Create pull request for lockfile changes
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ github.token }}
           branch: chore/update-yarn-lock
