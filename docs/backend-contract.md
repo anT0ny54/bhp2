@@ -2,7 +2,7 @@
 
 | Version | API | Status |
 |---|---:|---|
-| 2.2.20 | 1 | Stable |
+| 2.2.24 | 1 | Stable |
 
 ## Endpoint
 
@@ -50,11 +50,19 @@ clamps to 1 — a present value is never mistaken for an absent one.
 | DNS lookup timeout (per hop, also bounded by the deadline above) | 2 s |
 | Redirects followed | 5 |
 | Source image size | 15 MiB (15 × 1024 × 1024 bytes) |
-| Source image pixels | 24 MP |
+| Source image pixels | 6 MP (6,000,000; for multi-frame input, all frames counted together) |
 | Response size target (before base64) | 4.3 MB (4,300,000 bytes) |
 | Sharp processing timeout | 8 s per pipeline; libuv queue wait is excluded |
 | Request budget (no new fallback encode starts after it) | 20 s from request start |
 | Fallback encodes after the first encode | 5 |
+
+The request budget assumes Netlify's documented default of 30 s for
+synchronous Functions. The budget only stops *new* fallback encodes, so the
+worst case is a last encode that starts just before 20 s and runs for the 8 s
+Sharp timeout: about 28 s. If your site is configured with a lower function
+timeout, lower `REQUEST_BUDGET_MS` in `functions/index.js` to match, or the
+platform will end the request with an opaque gateway error instead of the
+proxy's `504`.
 
 ## Serverless image-processing defaults
 
@@ -62,8 +70,10 @@ clamps to 1 — a present value is never mistaken for an absent one.
 - When the output would exceed the response target, one lower-quality encode is tried, then narrower widths chosen by a size model (size ∝ width^k, re-fitted from the last two measurements), within the fallback-encode and request-budget limits above.
 - Sharp uses `concurrency(1)` to keep per-image native thread usage predictable; this does not cap concurrent function invocations.
 - Each Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time spent waiting for a libuv worker, and the timeout is per pipeline rather than a whole-request deadline.
-- Input decoding is limited to 24 MP by default. Increase only after measuring peak memory and concurrent-request behavior on a Netlify deploy preview.
+- Decoding uses `failOn: "none"`, so truncated or slightly corrupt images (common on real sites) are still compressed instead of failing; non-image data still fails. The pixel limit and processing timeout always apply.
+- Input decoding is limited to 6 MP by default (`MAX_INPUT_PIXELS` in `functions/index.js`). An image above it is rejected with `413` before any decode, and for multi-frame input the pixels of all frames are summed. Increase only after measuring peak memory and concurrent-request behavior on a Netlify deploy preview.
 - Sharp cache and Node/libuv thread-pool defaults are unchanged until benchmarks show they are a bottleneck.
+- Each fallback encode re-decodes the source. Decoding once to raw pixels was measured (3000×2000 JPEG, four probe widths): 805 ms vs 897 ms, about 10% faster, but it holds up to ~24 MB of raw RGBA for a 6 MP input. It is not used; libvips shrink-on-load already makes narrow re-decodes cheap.
 
 These are conservative defaults, not measured performance guarantees. Validate with representative JPEG, PNG, WebP, and animated inputs before production rollout.
 
@@ -90,7 +100,7 @@ uses the telemetry headers for statistics.
 HTTP/1.1 200 OK
 Content-Type: image/webp
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.20
+X-BH-Version: 2.2.24
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -111,10 +121,35 @@ with `413` rather than producing a response Netlify would reject.
 For WebP output, if compression would make the representation larger, the
 original image bytes are returned instead and compressed/original size are
 equal, but only when the original is a format every Chromium browser displays
-(JPEG, PNG, GIF, WebP, AVIF). The media type is detected from the bytes, not
+(JPEG, PNG, GIF, WebP, AVIF) **and** already satisfies the request: its
+displayed width is at most `max_width` (when set; EXIF orientations 5–8 swap
+the stored width and height, so the rotated width is used), and it is already
+grayscale when `bw=1`.
+Otherwise the (larger) WebP is returned so grayscale and width limits are
+always honored. The media type is detected from the bytes, not
 taken from the upstream `Content-Type`. Any other format (TIFF, HEIC, JPEG XL,
 SVG) is always returned as WebP, even when larger. Explicit `jpeg=1` requests
 for static images are always returned as JPEG.
+
+## CORS
+
+Every response (images, errors, the handshake, `/api/health` and `OPTIONS`
+preflights) carries these headers from `util/headers.js`:
+
+```text
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, OPTIONS
+Access-Control-Allow-Headers: Content-Type
+Access-Control-Max-Age: 86400
+Access-Control-Expose-Headers: X-BH-Backend, X-BH-Version, X-BH-Api, X-BH-Features, X-BH-Original-Size, X-BH-Compressed-Size, X-BH-Bytes-Saved, X-Original-Size, X-Compressed-Size, X-Bytes-Saved
+Cross-Origin-Resource-Policy: cross-origin
+```
+
+`Access-Control-Expose-Headers` lists the telemetry headers shown above.
+Without it, a caller that is subject to CORS (a web page, or a content script
+making a cross-origin request) cannot read them from a successful response.
+Releases before 2.2.24 did not send it. The integration suite fails if a
+telemetry header is sent but not exposed, or exposed but never sent.
 
 ## Error responses
 
@@ -133,7 +168,7 @@ a broken deployment is diagnosable from the response body.
 | 400 | `url` is not a valid HTTP/HTTPS URL |
 | 403 | `url` is a literal private/local host, a hostname resolved to a private address, or a redirect led to a private address |
 | 405 | Method other than `GET`/`OPTIONS` (`Allow: GET, OPTIONS`) |
-| 413 | Source above 15 MiB, optimized output cannot fit the response target within the fallback-encode limit, or original bytes above the target would have to be returned unmodified |
+| 413 | Source above 15 MiB or above the 6 MP decoding limit, optimized output cannot fit the response target within the fallback-encode limit, or original bytes above the target would have to be returned unmodified |
 | 415 | Upstream explicitly returned a non-image `Content-Type` |
 | 4xx/5xx | Upstream error statuses are passed through |
 | 500 | Other processing failure (for example, undecodable image data) |
@@ -145,7 +180,7 @@ a broken deployment is diagnosable from the response body.
 ## Security
 
 - Only HTTP and HTTPS URLs are accepted.
-- Localhost, loopback, RFC1918, link-local, CGNAT, multicast and other private
+- `localhost`, every `*.localhost` name (RFC 6761), loopback, RFC1918, link-local, CGNAT, multicast and other private
   or special-purpose address ranges are rejected; see
   [Address policy](#address-policy) for the exact ranges.
 - DNS answers are resolved and checked before every upstream request, and the
@@ -157,9 +192,9 @@ a broken deployment is diagnosable from the response body.
 - Cookies are never forwarded upstream (a browser only sends the proxy
   origin's own cookies to the proxy). `Referer` is forwarded and stripped
   when a redirect crosses origins; same-origin redirects keep it.
-- The upstream `Accept` header is fixed rather than copied from the client,
-  so an `Accept`-negotiating CDN cannot place one client's format into the
-  shared cache.
+- The upstream `Accept`, `User-Agent` and `Accept-Language` headers are fixed
+  rather than copied from the client, so a CDN that negotiates or sniffs on
+  them cannot place one client's variant into the shared cache.
 - IPv6 addresses that embed an IPv4 address (IPv4-mapped, NAT64 and 6to4) are
   judged by the embedded IPv4 address.
 - One 8 s deadline covers DNS resolution, every redirect hop and the body
@@ -230,6 +265,15 @@ Netlify-Vary: query=url|quality|bw|jpeg|max_width|l
 Responses for unencoded legacy URLs whose own query string leaked into the
 outer one use `Netlify-Vary: query` instead, so different upstream URLs never
 share a cache entry. Errors use `private, no-store`.
+
+**Known limitation:** the upstream `Accept`, `User-Agent` and
+`Accept-Language` headers are fixed so they cannot vary the cached result, but
+`Referer` (kept for hotlink protection) and `DNT` are forwarded from the client
+and are **not** part of the cache key. If an image host answers differently
+depending on `Referer` (for example a hotlink-protection placeholder served
+with status 200), the variant produced by the first request is what the CDN
+serves for the next 30 days. Error responses are never cached, so a host that
+refuses with `403` is not affected.
 
 ## Netlify deployment
 
