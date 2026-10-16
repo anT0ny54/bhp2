@@ -1,8 +1,8 @@
 # Bandwidth Proxy 2 — Backend Contract
 
-**Version:** 2.2.15  
-**API:** 1  
-**Status:** Stable
+| Version | API | Status |
+|---|---:|---|
+| 2.2.18 | 1 | Stable |
 
 ## Endpoint
 
@@ -28,23 +28,27 @@ A request without `url` is the legacy handshake: `200` with the plain-text body
 `bandwidth-hero-proxy` and `Cache-Control: public, max-age=300`.
 
 Non-numeric `quality`/`max_width` values fall back to their defaults; numeric
-values are clamped (`quality` 1–100, `max_width` 0–8192).
+values are clamped (`quality` 1–100, `max_width` 0–8192). `quality=0`
+clamps to 1 — a present value is never mistaken for an absent one.
 
 ## Limits
 
 | Limit | Value |
 |---|---|
 | Upstream fetch deadline (DNS resolution + all redirect hops + body download) | 8 s |
+| Upstream socket inactivity timeout (resets on activity) | 5 s |
 | DNS lookup timeout (per hop, also bounded by the deadline above) | 2 s |
 | Redirects followed | 5 |
-| Source image size | 15 MB |
+| Source image size | 15 MiB (15 × 1024 × 1024 bytes) |
 | Source image pixels | 24 MP |
-| Response size target (before base64) | 4.3 MB |
+| Response size target (before base64) | 4.3 MB (4,300,000 bytes) |
+| Sharp processing timeout | 8 s per pipeline; libuv queue wait is excluded |
 
 ## Serverless image-processing defaults
 
 - Sharp WebP uses `effort: 4` to favor response time over maximum compression effort.
 - Sharp uses `concurrency(1)` to keep per-image native thread usage predictable; this does not cap concurrent function invocations.
+- Each Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time spent waiting for a libuv worker, and the timeout is per pipeline rather than a whole-request deadline.
 - Input decoding is limited to 24 MP by default. Increase only after measuring peak memory and concurrent-request behavior on a Netlify deploy preview.
 - Sharp cache and Node/libuv thread-pool defaults are unchanged until benchmarks show they are a bottleneck.
 
@@ -71,9 +75,8 @@ uses the telemetry headers for statistics.
 ```text
 HTTP/1.1 200 OK
 Content-Type: image/webp
-Content-Encoding: identity
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.15
+X-BH-Version: 2.2.18
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
@@ -84,9 +87,10 @@ X-Compressed-Size: <bytes>
 X-Bytes-Saved: <bytes>
 ```
 
-When `jpeg=1` is requested and the source is a multi-frame GIF/WebP/TIFF
-(detected from the bytes even if the upstream omitted `Content-Type`), the
-original animated bytes are returned unmodified, because JPEG cannot carry
+When `jpeg=1` is requested and the source is multi-frame (any raster
+format: GIF/WebP/TIFF/APNG/animated AVIF/HEIF — every `jpeg=1` source is
+probed for `metadata.pages` regardless of Content-Type), the original
+animated bytes are returned unmodified, because JPEG cannot carry
 animation. If those bytes exceed the 4.3 MB response target, the request fails
 with `413` rather than producing a response Netlify would reject.
 
@@ -109,8 +113,8 @@ a broken deployment is diagnosable from the response body.
 |---:|---|
 | 200 | Image, or the handshake when `url` is absent |
 | 204 | CORS preflight (`OPTIONS`) |
-| 400 | `url` is not a valid HTTP/HTTPS URL, or is a literal private/local host |
-| 403 | Hostname resolved to a private address, or a redirect led to a private address |
+| 400 | `url` is not a valid HTTP/HTTPS URL |
+| 403 | `url` is a literal private/local host, a hostname resolved to a private address, or a redirect led to a private address |
 | 405 | Method other than `GET`/`OPTIONS` (`Allow: GET, OPTIONS`) |
 | 413 | Source above 15 MB, optimized output cannot fit the response target, or original bytes above the target would have to be returned unmodified |
 | 415 | Upstream explicitly returned a non-image `Content-Type` |
@@ -118,7 +122,7 @@ a broken deployment is diagnosable from the response body.
 | 500 | Other processing failure (for example, undecodable image data) |
 | 502 | DNS failure, upstream connection failure `[<code>]`, or invalid redirect |
 | 503 | Sharp is unavailable on the runtime |
-| 504 | Upstream deadline exceeded (including a stalled body download) |
+| 504 | Upstream deadline exceeded (including a stalled body download) or Sharp processing timeout |
 | 508 | More than 5 redirects |
 
 ## Security
