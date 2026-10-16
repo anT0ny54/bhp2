@@ -53,6 +53,16 @@ jobs:
           # --ignore-scripts keeps dependency lifecycle scripts from running.
           yarn install --frozen-lockfile --ignore-scripts
 
+      - name: Verify Sharp native pins
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # Dependabot may bump `sharp` without the four matching @img/*
+          # pins; a mismatch ships broken native binaries to the deployed
+          # function (the 2.2.4/2.2.6 class of drift).
+          yarn run check:sharp-pins
+
       - name: Validate and test
         shell: bash
         run: |
