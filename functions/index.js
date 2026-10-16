@@ -10,11 +10,10 @@ import {
   createPinnedLookup,
 } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
+import { BASE_HEADERS } from "../util/headers.js";
 
 const DETECTED_IMAGE_TYPES = Object.freeze({
   jpeg: "image/jpeg",
-  jpg: "image/jpeg",
   png: "image/png",
   webp: "image/webp",
   gif: "image/gif",
@@ -28,10 +27,18 @@ const DETECTED_IMAGE_TYPES = Object.freeze({
 const DEFAULT_QUALITY = 60;
 const DEFAULT_MAX_WIDTH = 0;
 const FETCH_TIMEOUT_MS = 8_000;
+// Socket inactivity timeout, deliberately shorter than the shared 8 s
+// deadline so slow-drip protection between bytes fires BEFORE the deadline
+// instead of being shadowed by it (previously both were 8 s and this timer
+// could never fire first).
+const SOCKET_INACTIVITY_TIMEOUT_MS = 5_000;
 const MAX_REDIRECTS = 5;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 // Conservative default for serverless memory headroom; raise only after load testing.
 const MAX_INPUT_PIXELS = 24_000_000;
+// Sharp disables its own processing timeout by default. Bound each libvips
+// pipeline so a stalled decode/encode can be mapped to an actionable 504.
+const SHARP_PROCESSING_TIMEOUT_SECONDS = 8;
 // Netlify buffered Functions have a 6 MB response limit; Lambda-style
 // binary responses are base64 encoded, so keep a safety margin below it.
 const MAX_FUNCTION_OUTPUT_BYTES = 4_300_000;
@@ -48,11 +55,6 @@ const PRIVATE_CACHE_HEADERS = {
   "cache-control": "private, no-store",
 };
 
-const BASE_HEADERS = {
-  ...CORS_HEADERS,
-  ...SECURITY_HEADERS,
-};
-
 // Runtime limits live in one frozen object so the integration tests can shrink
 // them (a 500 ms deadline instead of 8 s, a 2 KB output cap instead of 4.3 MB)
 // without touching the production defaults or exposing them to requests.
@@ -65,8 +67,11 @@ const DEFAULT_SETTINGS = Object.freeze({
 });
 let settings = DEFAULT_SETTINGS;
 
+// Merges into the CURRENT settings instead of resetting to defaults first:
+// an overrides-only call must not silently restore the real DNS resolver
+// (which would cause accidental network calls in CI).
 export function configureForTests(overrides = {}) {
-  settings = Object.freeze({ ...DEFAULT_SETTINGS, ...overrides });
+  settings = Object.freeze({ ...settings, ...overrides });
 }
 export function resetConfigForTests() {
   settings = DEFAULT_SETTINGS;
@@ -170,8 +175,13 @@ function normalizeImageUrl(value) {
   }
 }
 
-function parseInteger(value, fallback, min, max) {
-  const n = Number.parseInt(value, 10);
+export function parseInteger(value, fallback, min, max) {
+  const text = String(value ?? "").trim();
+  // parseInt() accepts numeric prefixes such as "20px" or "1e2". Query
+  // parameters are integers by contract, so reject malformed values entirely
+  // before applying the documented default/clamp behavior.
+  if (!/^[+-]?\d+$/.test(text)) return fallback;
+  const n = Number.parseInt(text, 10);
   return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
 }
 
@@ -228,16 +238,35 @@ function requestPinned(urlString, upstreamHeaders, lookup, signal, socketTimeout
     }
     const target = new URL(urlString);
     const transport = target.protocol === "https:" ? https : http;
-    const request = transport.get(target, {
-      lookup,
-      headers: upstreamHeaders,
-      // Fresh socket per hop; nothing pooled, nothing to leak or keep warm.
-      agent: false,
-    }, (response) => {
-      resolve(response);
-    });
+    let request;
+    // The abort listener must be removed when the exchange finishes, not only
+    // when it fires: { once: true } alone leaks one stale listener per
+    // redirect hop on the success path. The response "close" event covers
+    // normal body completion AND any mid-body destroy() (including aborts),
+    // so the shared deadline stays armed for the whole download.
+    const onAbort = () => request?.destroy(signal.reason);
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
 
-    request.on("error", reject);
+    try {
+      request = transport.get(target, {
+        lookup,
+        headers: upstreamHeaders,
+        // Fresh socket per hop; nothing pooled, nothing to leak or keep warm.
+        agent: false,
+      }, (response) => {
+        response.once("close", cleanup);
+        resolve(response);
+      });
+    } catch (error) {
+      cleanup();
+      reject(error);
+      return;
+    }
+
+    request.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
 
     // Socket inactivity timeout; resets on activity, so a slow-drip upstream
     // cannot stall forever even between bytes.
@@ -249,7 +278,6 @@ function requestPinned(urlString, upstreamHeaders, lookup, signal, socketTimeout
     });
 
     // One deadline covers every hop AND the body download.
-    const onAbort = () => request.destroy(signal.reason);
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
   });
@@ -281,7 +309,8 @@ async function readLimitedBody(response, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
-export async function fetchImage(normalizedHeaders, initialUrl) {
+// Internal to this module (tests exercise it through handler()).
+async function fetchImage(normalizedHeaders, initialUrl) {
   const { fetchTimeoutMs, maxImageBytes, resolveRemoteUrl } = settings;
   let currentUrl = initialUrl;
   // Forwarded request headers don't change across hops, except that
@@ -305,13 +334,18 @@ export async function fetchImage(normalizedHeaders, initialUrl) {
         throw error;
       }
 
+      // Parse once per hop; the origin comparison in the redirect branch used
+      // to re-parse validation.url on every cross-origin redirect.
+      const validatedUrl = new URL(validation.url);
+      const validatedOrigin = validatedUrl.origin;
+
       controller.signal.throwIfAborted();
       const upstream = await requestPinned(
         validation.url,
         upstreamHeaders,
         createPinnedLookup(validation.addresses),
         controller.signal,
-        fetchTimeoutMs,
+        socketTimeout(fetchTimeoutMs),
       );
 
       const location = upstream.headers.location;
@@ -326,13 +360,16 @@ export async function fetchImage(normalizedHeaders, initialUrl) {
         }
         let next;
         try {
-          next = new URL(location, validation.url);
+          next = new URL(location, validatedUrl);
         } catch {
           const error = new Error("Upstream sent an invalid redirect location.");
           error.statusCode = 502;
           throw error;
         }
-        if (next.origin !== new URL(validation.url).origin) {
+        if (next.protocol !== "http:" && next.protocol !== "https:") {
+          throw createHttpError(502, "Upstream sent an invalid redirect location.");
+        }
+        if (next.origin !== validatedOrigin) {
           const { cookie, referer, ...withoutCredentials } = upstreamHeaders;
           upstreamHeaders = withoutCredentials;
         }
@@ -392,6 +429,12 @@ export async function fetchImage(normalizedHeaders, initialUrl) {
   }
 }
 
+// Tests shrink fetchTimeoutMs below the production inactivity timeout; the
+// socket timer must never outlive the shared deadline it backs up.
+function socketTimeout(fetchTimeoutMs) {
+  return Math.min(SOCKET_INACTIVITY_TIMEOUT_MS, fetchTimeoutMs);
+}
+
 function getSafeUpstreamHeaders(headers) {
   const output = {};
   for (const name of ["etag", "last-modified", "expires"]) {
@@ -399,6 +442,12 @@ function getSafeUpstreamHeaders(headers) {
     if (value) output[name] = value;
   }
   return output;
+}
+
+function isTimeoutError(error) {
+  return error?.name === "AbortError" ||
+    error?.name === "TimeoutError" ||
+    /timeout|timed?\s*out/i.test(String(error?.message || ""));
 }
 
 // Every decode uses the same safety options; building the instance in one
@@ -410,7 +459,7 @@ async function createSharpPipeline(input, animated) {
     animated,
     failOn: "warning",
     limitInputPixels: MAX_INPUT_PIXELS,
-  });
+  }).timeout({ seconds: SHARP_PROCESSING_TIMEOUT_SECONDS });
 }
 
 async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
@@ -432,12 +481,18 @@ async function encodeImage(input, useWebp, grayscale, quality, maxWidth) {
         minSize: true,
         mixed: true,
       }).toBuffer()
-    : pipeline.jpeg({
-        quality,
-        progressive: true,
-        mozjpeg: true,
-        chromaSubsampling: "4:2:0",
-      }).toBuffer();
+    : pipeline
+        // JPEG has no alpha channel; compositing transparency onto white
+        // instead of letting Sharp implicitly drop the alpha avoids black or
+        // broken-looking transparent regions in PNG/WebP sources.
+        .flatten({ background: "#ffffff" })
+        .jpeg({
+          quality,
+          progressive: true,
+          mozjpeg: true,
+          chromaSubsampling: "4:2:0",
+        })
+        .toBuffer();
 }
 
 // Fallback widths, widest first. The ladder deliberately continues far below
@@ -463,6 +518,14 @@ export function buildFallbackWidths(maxWidth) {
   return widths;
 }
 
+// Preserve a client's low requested quality during the width fallback. The
+// codec-specific floor is intended to prevent wasteful quality searches, not
+// to increase quality above the original request (e.g. JPEG quality=5).
+export function getFallbackQuality(quality, useWebp) {
+  const floor = useWebp ? 10 : 20;
+  return Math.min(quality, Math.max(floor, Math.floor(quality / 2)));
+}
+
 export async function compressImage(
   input,
   useWebp,
@@ -481,11 +544,45 @@ export async function compressImage(
     if (output.length <= maxOutputBytes) return output;
   }
 
-  // If quality alone is insufficient, progressively reduce dimensions. This
-  // protects large images from producing a base64 response that Netlify will
-  // reject while preserving the extension's normal max_width behaviour.
-  for (const width of buildFallbackWidths(maxWidth)) {
-    output = await encodeImage(input, useWebp, grayscale, useWebp ? 30 : 45, width);
+  // If quality alone is insufficient, reduce dimensions. Encoded size usually
+  // trends down with width, so binary search keeps the common case to
+  // ceil(log2(n)) encodes instead of trying every rung. The relationship is
+  // not guaranteed to be strictly monotonic for every codec and image, so a
+  // successful probe is always checked against the cap and a no-fit search
+  // scans unprobed rungs before returning 413. This protects the response-size
+  // limit without making every normal request pay for a linear search.
+  // The ladder quality follows the REQUESTED quality (halved, with a floor)
+  // instead of a hardcoded 30/45, so high-quality requests don't silently
+  // receive the minimum.
+  const ladderQuality = getFallbackQuality(quality, useWebp);
+  const widths = buildFallbackWidths(maxWidth);
+  let lo = 0;
+  let hi = widths.length - 1;
+  let best = -1;
+  const probedOutputs = new Map();
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    output = await encodeImage(input, useWebp, grayscale, ladderQuality, widths[mid]);
+    probedOutputs.set(mid, output);
+    if (output.length <= maxOutputBytes) {
+      best = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  if (best >= 0) return probedOutputs.get(best);
+
+  // Encoded size usually trends down with width, but codecs and image content
+  // do not guarantee strict monotonicity. If binary search found no fit, check
+  // every unprobed rung before returning 413 so a non-monotonic size curve
+  // cannot turn a viable image into a false failure. Reuse prior probes.
+  for (let i = 0; i < widths.length; i += 1) {
+    output = probedOutputs.get(i);
+    if (!output) {
+      output = await encodeImage(input, useWebp, grayscale, ladderQuality, widths[i]);
+      probedOutputs.set(i, output);
+    }
     if (output.length <= maxOutputBytes) return output;
   }
 
@@ -499,7 +596,6 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
   return {
     "content-type": contentType,
     "content-length": String(compressedSize),
-    "content-encoding": "identity",
     "x-bh-backend": "bandwidth-proxy-2",
     "x-bh-version": PROXY_VERSION,
     "x-bh-api": API_VERSION,
@@ -518,7 +614,8 @@ async function getDetectedImageContentType(buffer) {
   try {
     const metadata = await (await createSharpPipeline(buffer, true)).metadata();
     return DETECTED_IMAGE_TYPES[metadata.format] || "application/octet-stream";
-  } catch {
+  } catch (error) {
+    if (isTimeoutError(error)) throw error;
     return "application/octet-stream";
   }
 }
@@ -575,7 +672,9 @@ export async function handler(event = {}) {
   }
 
   if (isPrivateHost(initial.hostname)) {
-    return createResponse(400, PRIVATE_HOST_ERROR, {
+    // Same policy rejection as the DNS-validated path: 403, not 400 (the
+    // request is well-formed; the target is forbidden).
+    return createResponse(403, PRIVATE_HOST_ERROR, {
       "content-type": "text/plain; charset=utf-8",
       ...PRIVATE_CACHE_HEADERS,
     });
@@ -583,7 +682,9 @@ export async function handler(event = {}) {
 
   const useWebp = query.jpeg !== "1";
   const grayscale = parseBoolean(query.bw);
-  const quality = parseInteger(query.quality || query.l, DEFAULT_QUALITY, 1, 100);
+  // `??` (not `||`): quality=0 is a present value and must clamp to 1 instead
+  // of falling through to the legacy alias/default like an absent parameter.
+  const quality = parseInteger(query.quality ?? query.l, DEFAULT_QUALITY, 1, 100);
   const maxWidth = parseInteger(query.max_width, DEFAULT_MAX_WIDTH, 0, 8192);
   const normalizedHeaders = getNormalizedHeaders(event);
   const cacheHeaders = hasCredentials(normalizedHeaders) ? PRIVATE_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
@@ -594,9 +695,10 @@ export async function handler(event = {}) {
 
     // JPEG has no animation model. If WebP is unavailable to the client,
     // preserve multi-frame sources instead of returning only the first frame.
-    // A missing Content-Type is probed too, so an animated GIF from a CDN
-    // that omits the header is not silently flattened to its first frame.
-    if (!useWebp && (!source.contentType || /^image\/(gif|webp|tiff)$/i.test(source.contentType))) {
+    // APNG and animated AVIF/HEIF are served with ordinary image/png |
+    // image/avif Content-Types, so filtering by Content-Type cannot catch
+    // them — probe the bytes of EVERY jpeg=1 source for multiple frames.
+    if (!useWebp) {
       try {
         const metadata = await (await createSharpPipeline(source.buffer, true)).metadata();
         if ((metadata.pages || 1) > 1) {
@@ -605,8 +707,9 @@ export async function handler(event = {}) {
         }
       } catch (error) {
         // An undecodable body with a declared image type is reported by the
-        // compression step below; only a 503/413-style HTTP error is final here.
-        if (Number.isInteger(error?.statusCode)) throw error;
+        // compression step below; service-limit errors and processing timeouts
+        // are final and must not be swallowed by this metadata probe.
+        if (Number.isInteger(error?.statusCode) || isTimeoutError(error)) throw error;
       }
     }
 
@@ -635,9 +738,11 @@ export async function handler(event = {}) {
     );
   } catch (error) {
     console.error("Image proxy error:", error?.message || error, error?.cause || "");
+    // Sharp versions can report a processing timeout by name or by message;
+    // classify both forms as 504 instead of a generic 500.
     const statusCode = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599
       ? error.statusCode
-      : error?.name === "AbortError" ? 504 : 500;
+      : isTimeoutError(error) ? 504 : 500;
     const message = error?.message || "Image processing failed.";
     return createResponse(statusCode, message, {
       "content-type": "text/plain; charset=utf-8",

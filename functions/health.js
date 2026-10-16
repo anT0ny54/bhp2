@@ -1,13 +1,5 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { CORS_HEADERS, SECURITY_HEADERS } from "../util/headers.js";
-
-// Same response-building pattern as functions/index.js: shared CORS and
-// security headers come from util/headers.js exactly once, so a future header
-// addition cannot be missed in one handler.
-const BASE_HEADERS = {
-  ...CORS_HEADERS,
-  ...SECURITY_HEADERS,
-};
+import { BASE_HEADERS } from "../util/headers.js";
 
 const HEALTH_HEADERS = {
   "content-type": "application/json; charset=utf-8",
