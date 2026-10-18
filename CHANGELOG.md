@@ -8,6 +8,26 @@ and this file together.
 Releases before 2.2.21 were not recorded here. Their history is available in
 the git log; it is deliberately not reconstructed from memory.
 
+## [2.2.25] - 2026-10-18
+
+A second full read-through of every file in the repository (both functions, all
+four `util/` modules, all six test suites, CI workflows, Netlify config, docs
+and the lockfile), followed by the complete local gate
+(`yarn run check`: syntax check, Sharp native-pin check and all 76 tests —
+all passing). No dead code, unused exports, debug statements, environment
+variables or lint violations were found, and no code defects surfaced, so this
+release changes documentation only.
+
+### Docs
+
+- `README.md`: the intro now names the current release and links the changelog
+  and backend contract up front; the testing section cross-references the
+  suite table; and a few wordings were tightened. No factual content changed.
+- `docs/backend-contract.md`: the version-history table gained the 2.2.25 row
+  and the example `X-BH-Version` header in the response sample was synced.
+- No behavioral change: `util/version.js` and `package.json` were bumped to
+  2.2.25 only to keep the version-consistency test green.
+
 ## [2.2.24] - 2026-10-17
 
 Full read-through of every file in the repository (code, tests, CI, docs and
@@ -65,4 +85,3 @@ defects below needed a code change.
     `package.json` scripts and sits in exactly one of `test:fast` or
     `test:integration`. The scripts name files explicitly, so an unlisted file
     would otherwise never run in CI. Passes on 2.2.23; guards future changes.
-

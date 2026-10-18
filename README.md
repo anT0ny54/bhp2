@@ -14,6 +14,9 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 📋 **Changelog:** [CHANGELOG.md](CHANGELOG.md) ·
 **API contract:** [docs/backend-contract.md](docs/backend-contract.md)
 
+The current release is **2.2.25** (see the
+[changelog](CHANGELOG.md) for what each release changed).
+
 ---
 
 ## ✨ Features (verified against the code)
@@ -178,6 +181,9 @@ yarn test:integration      # 40 Sharp/loopback tests (compression + request inte
 yarn run check             # full local gate (syntax check + Sharp native-pin check + all tests)
 ```
 
+The table below describes what each suite covers; the counts above are kept in
+sync with the suites by the version-consistency test in `tests/health.test.js`.
+
 > [!IMPORTANT]
 > Use `yarn run check`, not `yarn check`. `check` is a built-in Yarn Classic
 > command (lockfile integrity check) and takes precedence over the script.
@@ -266,7 +272,7 @@ If a proposed change satisfies none of these, it will not be accepted.
 1. **Prefer simpler code** over clever abstractions.
 2. **Prefer fewer dependencies** to keep the footprint tiny.
 3. **Prefer backward compatibility** at all times to prevent breaking active
-  client extensions.
+   client extensions.
 4. **Prefer serverless-first solutions** matching free tier environments.
 5. **Benchmark before optimizing**. Do not optimize based on assumptions.
 
