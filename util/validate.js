@@ -167,23 +167,34 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
   // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"),
   // which getaddrinfo cannot resolve. Strip them so public IPv6 literals work.
   const hostname = validation.hostname.replace(/^\[|\]$/g, "");
+
+  // An IP literal needs no DNS: validateRemoteUrl() already judged it with the
+  // same address policy, so pin it directly instead of racing a lookup, a
+  // timer and an abort listener for an answer that is the literal itself.
+  const literalFamily = net.isIP(hostname);
+  if (literalFamily) {
+    return { valid: true, url: validation.url, addresses: [{ address: hostname, family: literalFamily }] };
+  }
+
   let records;
   let timer;
   let onAbort;
   try {
-    records = await Promise.race([
+    const racers = [
       // `order: "verbatim"` replaces the deprecated `verbatim: true` option.
       dns.lookup(hostname, { all: true, order: "verbatim" }),
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), timeoutMs);
       }),
-      new Promise((_, reject) => {
-        if (!signal) return;
+    ];
+    if (signal) {
+      racers.push(new Promise((_, reject) => {
         onAbort = () => reject(signal.reason);
         signal.addEventListener("abort", onAbort, { once: true });
-      }),
-    ]);
-  } catch (error) {
+      }));
+    }
+    records = await Promise.race(racers);
+  } catch {
     if (signal?.aborted) throw signal.reason;
     return { valid: false, error: DNS_RESOLUTION_ERROR, statusCode: 502 };
   } finally {
