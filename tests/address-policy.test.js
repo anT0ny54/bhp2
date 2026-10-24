@@ -13,6 +13,7 @@ import {
   BLOCKED_IPV6_CIDRS,
   IPV6_GLOBAL_UNICAST_CIDR,
   isPrivateIp,
+  resolveAndValidateRemoteUrl,
 } from "../util/validate.js";
 
 // --- independent address arithmetic ---------------------------------------
@@ -193,4 +194,20 @@ test("malformed addresses fail closed", () => {
   for (const value of ["", "not-an-ip", "1.2.3", "1.2.3.4.5", "256.1.1.1", "2001:db8:::1", "fe80::1%eth0"]) {
     assert.equal(isPrivateIp(value), true, JSON.stringify(value));
   }
+});
+
+test("public IP literals are pinned directly without DNS; the deadline still wins", async () => {
+  const v4 = await resolveAndValidateRemoteUrl("http://8.8.8.8/a.png");
+  assert.deepEqual(v4.addresses, [{ address: "8.8.8.8", family: 4 }]);
+  const v6 = await resolveAndValidateRemoteUrl("https://[2606:4700:4700::1111]/a.png");
+  assert.equal(v6.valid, true);
+  assert.deepEqual(v6.addresses, [{ address: "2606:4700:4700::1111", family: 6 }]);
+  assert.equal((await resolveAndValidateRemoteUrl("http://[::ffff:a9fe:a9fe]/")).statusCode, 403);
+
+  const controller = new AbortController();
+  controller.abort(new Error("deadline"));
+  await assert.rejects(
+    resolveAndValidateRemoteUrl("http://8.8.8.8/a.png", { signal: controller.signal }),
+    /deadline/,
+  );
 });

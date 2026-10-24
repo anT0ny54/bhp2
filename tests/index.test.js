@@ -20,6 +20,7 @@ test("GET without url returns the service banner", async () => {
   const response = await handler({ httpMethod: "GET", queryStringParameters: {} });
   assert.equal(response.statusCode, 200);
   assert.equal(response.body, "bandwidth-hero-proxy");
+  assert.equal(response.headers["cache-control"], "public, max-age=300");
 });
 
 test("POST is rejected with 405", async () => {
@@ -88,6 +89,9 @@ test("fallback quality never exceeds a low requested quality", () => {
   assert.equal(getFallbackQuality(60, false), 30);
 });
 
+// The exact lists for 100 and 320 are the regression guard for the old ladder,
+// which ran out of widths immediately for small max_width values (more
+// property-style checks live in tests/compress.test.js).
 test("buildFallbackWidths only narrows below the requested width", () => {
   const all = buildFallbackWidths(0);
   assert.equal(all.length, 16);

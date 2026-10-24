@@ -9,12 +9,18 @@ import { BASE_HEADERS } from "../util/headers.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const backendContract = readFileSync(new URL("../docs/backend-contract.md", import.meta.url), "utf8");
+const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 
 test("release version and feature metadata stay in sync", () => {
   const contractLines = backendContract.split(/\r?\n/).map((line) => line.trim());
   assert.equal(packageJson.version, PROXY_VERSION);
   assert.ok(contractLines.includes(`| ${PROXY_VERSION} | ${API_VERSION} | Stable |`));
   assert.ok(backendContract.includes(`X-BH-Features: ${FEATURES.join(",")}`));
+  assert.ok(backendContract.includes(`X-BH-Version: ${PROXY_VERSION}`));
+  // The README names the current release and the changelog's newest entry is it.
+  assert.ok(readme.includes(`**${PROXY_VERSION}**`), "README.md must name the current release");
+  assert.equal(changelog.match(/^## \[([^\]]+)\]/m)?.[1], PROXY_VERSION, "CHANGELOG.md newest entry must be the current release");
 });
 
 test("GET returns ok with version, api level and features", async () => {

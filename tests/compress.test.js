@@ -60,20 +60,8 @@ test("fallback widths: max_width=800 offers 640, 320 and narrower sizes", () => 
   assert.ok(widths.some((w) => w < 320));
 });
 
-test("fallback widths: max_width=320 is not left empty", () => {
-  const widths = buildFallbackWidths(320);
-  assert.ok(widths.length > 0, "the old list was exhausted immediately here");
-  assert.equal(widths[0], 240);
-});
-
-test("fallback widths: max_width=100 is not left empty", () => {
-  const widths = buildFallbackWidths(100);
-  assert.ok(widths.length > 0, "the old list was exhausted immediately here");
-  assert.equal(widths[0], 80);
-});
-
 test("fallback widths: tiny and large limits", () => {
-  assert.deepEqual(buildFallbackWidths(16), [8, 4, 2, 1]);
+  // max_width=16 is asserted in tests/index.test.js.
   assert.deepEqual(buildFallbackWidths(2), [1]);
   assert.deepEqual(buildFallbackWidths(1), []); // nothing narrower than 1 px exists
   assert.equal(buildFallbackWidths(8192)[0], 4096);
