@@ -42,9 +42,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           # Yarn Classic refreshes resolutions within package.json's declared
-          # ranges. Exact-pinned direct dependencies remain pinned.
+          # ranges and installs the result, so no separate `yarn install` is
+          # needed. Exact-pinned direct dependencies remain pinned.
           yarn upgrade --non-interactive --ignore-scripts
-          yarn install --non-interactive --ignore-scripts
 
       - name: Verify Sharp native package pins
         shell: bash
