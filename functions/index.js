@@ -3,7 +3,7 @@ import https from "node:https";
 
 import { resolveAndValidateRemoteUrl, createPinnedLookup } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { BASE_HEADERS, createResponse } from "../util/headers.js";
+import { createResponse } from "../util/headers.js";
 import { loadSharp } from "../util/sharp.js";
 
 // Sharp's metadata().format values mapped to real media types. AVIF and HEIC
@@ -139,16 +139,12 @@ function createTimeoutError(message) {
   return new DOMException(message, "TimeoutError");
 }
 
+// Same response shape as every other reply (util/headers.js), with the image
+// bytes base64 encoded for the Functions runtime.
 function createBinaryResponse(buffer, headers, cacheHeaders) {
   return {
-    statusCode: 200,
+    ...createResponse(200, buffer.toString("base64"), { ...cacheHeaders, ...headers }),
     isBase64Encoded: true,
-    body: buffer.toString("base64"),
-    headers: {
-      ...BASE_HEADERS,
-      ...cacheHeaders,
-      ...headers,
-    },
   };
 }
 
@@ -442,7 +438,7 @@ function getSafeUpstreamHeaders(headers) {
 function isTimeoutError(error) {
   return error?.name === "AbortError" ||
     error?.name === "TimeoutError" ||
-    /timeout|timed?\s*out/i.test(String(error?.message || ""));
+    /timed?\s*out/i.test(String(error?.message || ""));
 }
 
 // Every decode uses the same safety options; building the instance in one
@@ -493,7 +489,7 @@ function getDetectedContentType(metadata) {
 async function encodeImage(input, { useWebp, grayscale, quality, width, animated }) {
   // WebP can preserve multi-frame input (GIF/animated WebP/TIFF), whereas
   // JPEG cannot. Never silently turn an animated image into a single frame.
-  let pipeline = (await createSharpPipeline(input, useWebp)).rotate();
+  let pipeline = (await createSharpPipeline(input, animated)).rotate();
 
   if (width > 0) {
     pipeline = pipeline.resize({ width, fit: "inside", withoutEnlargement: true });
