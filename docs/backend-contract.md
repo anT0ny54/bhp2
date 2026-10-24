@@ -4,6 +4,9 @@
 |---|---:|---|
 | 2.2.24 | 1 | Stable |
 | 2.2.25 | 1 | Stable |
+| 2.2.26 | 1 | Stable |
+| 2.2.27 | 1 | Stable |
+| 2.2.28 | 1 | Stable |
 
 ## Endpoint
 
@@ -101,7 +104,7 @@ uses the telemetry headers for statistics.
 HTTP/1.1 200 OK
 Content-Type: image/webp
 X-BH-Backend: bandwidth-proxy-2
-X-BH-Version: 2.2.25
+X-BH-Version: 2.2.28
 X-BH-Api: 1
 X-BH-Features: webp,grayscale,maxwidth,stats
 X-BH-Original-Size: <bytes>
