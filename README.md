@@ -14,7 +14,7 @@ page loads. It ships with a mobile-friendly diagnostics page (`index.html` +
 📋 **Changelog:** [CHANGELOG.md](CHANGELOG.md) ·
 **API contract:** [docs/backend-contract.md](docs/backend-contract.md)
 
-The current release is **2.2.25** (see the
+The current release is **2.2.28** (see the
 [changelog](CHANGELOG.md) for what each release changed).
 
 ---
@@ -113,14 +113,17 @@ The current release is **2.2.25** (see the
   the extension query params (the whole query for unencoded legacy URLs)
 - **Telemetry headers**: `x-bh-*` plus legacy `x-original-size`,
   `x-compressed-size`, `x-bytes-saved`
-- **Handshake response** (`bandwidth-hero-proxy`) for requests without a `url`
+- **Cacheable handshake response** (`bandwidth-hero-proxy`, 5-minute browser cache) for requests without a `url`
 - **Health check endpoint** (`/api/health`) reporting Sharp status, version,
   API level and features
 - **Built-in diagnostics page** with reachability, CORS/handshake, live image
   compression, and cache-header checks; checks that could not run are shown
   as "Skipped", and the header badge reflects the last run. Each request's
   deadline covers the response body, so a response that stalls after its
-  headers is reported as a timeout instead of leaving the run hanging
+  headers is reported as a timeout instead of leaving the run hanging.
+  The compression summary calculates its savings percentage only after the
+  image response has passed the same telemetry validation used to declare the
+  check successful.
 - **Netlify Functions** deployment ready (esbuild; Sharp externalized).
   `netlify.toml` includes only `node_modules/sharp` (the JavaScript package)
   plus the two **Linux x64** native packages, `@img/sharp-linux-x64` and
@@ -166,23 +169,24 @@ Full contract (status codes, limits, headers):
 > When bumping `sharp`, bump the four `@img/sharp-*` pins in
 > `optionalDependencies` to the versions that `sharp` itself declares, or the
 > installed native binary will not match the JavaScript wrapper. CI enforces
-> this with `yarn run check:sharp-pins` (`scripts/check-sharp-pins.mjs`),
-> which fails the build if the pins drift from the installed `sharp`'s own
-> `optionalDependencies`. Dependabot groups `sharp` and `@img/sharp-*` into
+> this through `yarn run check`, which runs `yarn run check:sharp-pins`
+> (`scripts/check-sharp-pins.mjs`) and fails the build if the pins drift from
+> the installed `sharp`'s own `optionalDependencies`. Dependabot groups `sharp` and `@img/sharp-*` into
 > one PR so bumps arrive together.
 
 ## 🧪 Testing
 
 ```bash
 yarn install               # installs dependencies; yarn.lock remains authoritative
-yarn test                  # all 76 tests across the six checked-in suites
-yarn test:fast             # 36 network-free tests (address policy, handlers, health, diagnostics page)
-yarn test:integration      # 40 Sharp/loopback tests (compression + request integration)
-yarn run check             # full local gate (syntax check + Sharp native-pin check + all tests)
+yarn test                  # all 77 tests across the six checked-in suites
+yarn test:fast             # 39 network-free tests (address policy, handlers, health, diagnostics page)
+yarn test:integration      # 38 Sharp/loopback tests (compression + request integration)
+yarn run check             # full local gate (syntax check of every shipped JS file + Sharp native-pin check + all tests)
 ```
 
-The table below describes what each suite covers; the counts above are kept in
-sync with the suites by the version-consistency test in `tests/health.test.js`.
+The table below describes what each suite covers. `tests/health.test.js` checks
+that every test file is wired into the package scripts; the displayed test
+counts are the current totals and must be updated when tests are added or removed.
 
 > [!IMPORTANT]
 > Use `yarn run check`, not `yarn check`. `check` is a built-in Yarn Classic
@@ -201,15 +205,15 @@ Suites:
 
 | File | Scope |
 |---|---|
-| `tests/index.test.js` | Handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, fallback-width generation, raw-query URL extraction (encoded, legacy unencoded, absent), `*.localhost` rejection, the legacy `1.1.x.x/bmi/` URL unwrap, and the rule for when the original may replace WebP output (including EXIF-rotated and multi-frame widths). No network or Sharp encoding. |
-| `tests/health.test.js` | `/api/health`, method handling, and consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, and `docs/backend-contract.md`, plus a guard that every `tests/*.test.js` file is listed in the `package.json` test scripts (the scripts name files explicitly, so an unlisted suite would silently never run). |
-| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, and malformed-address rejection. |
-| `tests/site.test.js` | The diagnostics page (`site.js`) evaluated in a `node:vm` context with a minimal fake DOM and a scripted `fetch`, with timers shortened: a healthy run, a failing health check skipping the rest, the server's error message being shown, and response bodies that stall after the headers (handshake and health) ending as a timeout with the button re-enabled, plus a WCAG AA contrast check (4.5:1) of the status colours in both the dark and light themes. No browser, no network. |
+| `tests/index.test.js` | Cacheable handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, fallback-width generation, raw-query URL extraction (encoded, legacy unencoded, absent), `*.localhost` rejection, the legacy `1.1.x.x/bmi/` URL unwrap, and the rule for when the original may replace WebP output (including EXIF-rotated and multi-frame widths). No network or Sharp encoding. |
+| `tests/health.test.js` | `/api/health`, method handling, and consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, `docs/backend-contract.md`, the release named in `README.md` and the newest `CHANGELOG.md` entry, plus a guard that every `tests/*.test.js` file is listed in the `package.json` test scripts (the scripts name files explicitly, so an unlisted suite would silently never run). |
+| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, malformed-address rejection, and public IP literals being pinned directly (no DNS) while the shared deadline still applies. |
+| `tests/site.test.js` | The diagnostics page (`site.js`) evaluated in a `node:vm` context with a minimal fake DOM and a scripted `fetch`, with timers shortened: a healthy run, a failing health check skipping the rest, the server's error message being shown, and response bodies that stall after the headers (handshake and health) ending as a timeout with the button re-enabled, plus a WCAG AA contrast check (4.5:1) of every text colour (body, muted, accent, status and primary-button text) against each surface it is drawn on, in both the dark and light themes, copy-feedback timer reset on repeated clicks, and protection against out-of-order clipboard completions. No browser, no network. |
 | `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, undecodable input, truncated-JPEG tolerance, the bounded fallback encode count, and the request-budget `504`. |
 | `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, `jpeg=true`, unsupported redirect schemes, the `508` redirect limit, redirects into private or local addresses (including IPv4-mapped IPv6) rejected with `403` by the real resolver and address policy on every hop after the first, `Referer` handling on same/cross-origin redirects, every `x-*` telemetry header being listed in `Access-Control-Expose-Headers`, fixed `Accept`/`User-Agent`/`Accept-Language` and no `Cookie` upstream, legacy and encoded raw-query URLs, upstream timeout and mid-body stall mapping, the `413` input-size limit, the `413` 6 MP decode limit (single-frame, exactly-at-limit and multi-frame), never-enlarge with detected type, never-enlarge honoring `bw=1` and `max_width` (including the EXIF-rotated width), non-browser formats staying WebP, and WebP telemetry headers. |
 
-The six checked-in suites currently contain 76 tests: 36 in `test:fast` and
-40 in `test:integration`.
+The six checked-in suites currently contain 77 tests: 39 in `test:fast` and
+38 in `test:integration`.
 
 The integration suite uses a small test-only configuration hook in
 `functions/index.js` (`configureForTests`) to shorten the deadline and shrink
@@ -295,9 +299,10 @@ This project's greatest asset is its minimal size.
 ## 🏷️ Release Policy
 
 - **Patch releases**: Strictly for bug fixes, security patches (e.g. SSRF
-  updates), latency improvements, and internal code cleanups.
+  updates), latency improvements, internal code cleanups, and documentation
+  corrections.
 - **Minor releases**: Adding optional configuration features (e.g. environment
-  variables), new diagnostic tools, or updating documentation.
+  variables) or new diagnostic tools.
 - **Major releases**: Required only for breaking changes to:
   - The API boundaries.
   - Query parameter interfaces.
@@ -305,10 +310,10 @@ This project's greatest asset is its minimal size.
   - Overall deployment processes.
 
 Every release must update `package.json`, `util/version.js`,
-`docs/backend-contract.md`, and `CHANGELOG.md` together. The current tests check
-that `package.json`, `util/version.js`, and `docs/backend-contract.md` agree on
-the version and feature metadata; they do not validate changelog contents, so
-add the changelog entry as part of the same change. Only record changes that
+`docs/backend-contract.md`, `README.md` (release number and test totals) and
+`CHANGELOG.md` together. The current tests check that these files agree on the
+release number (the changelog check only covers the newest entry's heading, not
+its contents), so write the changelog entry as part of the same change. Only record changes that
 can be verified; do not reconstruct history from memory.
 
 ---

@@ -123,16 +123,21 @@ async function runDiagnostics() {
       15000,
     );
     const elapsed = Math.round(performance.now() - started);
-    const type = image.headers.get("content-type") || "";
-    const original = Number(image.headers.get("x-bh-original-size") || 0);
-    const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
-    const ratio = original > 0 ? `${((saved / original) * 100).toFixed(1)}% saved` : "size telemetry unavailable";
     const compressedOk = isCompressedImage(image);
     const compressionDetail = serverMessage ? `HTTP ${image.status}: ${serverMessage}` : `HTTP ${image.status}`;
+
+    let successDetail = "";
+    if (compressedOk) {
+      const type = image.headers.get("content-type") || "";
+      const original = Number(image.headers.get("x-bh-original-size") || 0);
+      const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
+      successDetail = `${type} · ${elapsed} ms · ${((saved / original) * 100).toFixed(1)}% saved`;
+    }
+
     setStatus(
       "compression",
       compressedOk ? "ok" : "fail",
-      compressedOk ? `${type} · ${elapsed} ms · ${ratio}` : sharpOk ? compressionDetail : sharpError
+      compressedOk ? successDetail : sharpOk ? compressionDetail : sharpError
     );
 
     // Error responses are deliberately private/no-store, so the cache check
@@ -166,17 +171,34 @@ async function runDiagnostics() {
   }
 }
 
+let copyLabelTimer;
+let copyRequestId = 0;
+function clearCopyLabelTimer() {
+  if (copyLabelTimer !== undefined) clearTimeout(copyLabelTimer);
+  copyLabelTimer = undefined;
+}
 function flashCopyLabel(text) {
+  clearCopyLabelTimer();
   $("copy-button").textContent = text;
-  setTimeout(() => { $("copy-button").textContent = "Copy URL"; }, 1400);
+  copyLabelTimer = setTimeout(() => {
+    $("copy-button").textContent = "Copy URL";
+    copyLabelTimer = undefined;
+  }, 1400);
 }
 
 $("diagnostics-button").addEventListener("click", runDiagnostics);
 $("copy-button").addEventListener("click", async () => {
+  // Clipboard writes can settle out of order. Only the latest click may change
+  // the feedback label, just as only its timer may reset that label.
+  const requestId = ++copyRequestId;
+  clearCopyLabelTimer();
+  $("copy-button").textContent = "Copying…";
   try {
     await navigator.clipboard.writeText(proxyUrl);
+    if (requestId !== copyRequestId) return;
     flashCopyLabel("Copied ✓");
   } catch {
+    if (requestId !== copyRequestId) return;
     flashCopyLabel("Copy unavailable");
   }
 });

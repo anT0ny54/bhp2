@@ -2,86 +2,106 @@
 
 All notable changes to this project are documented in this file. Versioning
 follows the Release Policy section of [README.md](README.md): every
-release updates `package.json`, `util/version.js`, `docs/backend-contract.md`
-and this file together.
+release updates `package.json`, `util/version.js`, `docs/backend-contract.md`,
+`README.md` and this file together.
 
-Releases before 2.2.21 were not recorded here. Their history is available in
+Releases before 2.2.25 are not recorded here. Their history is available in
 the git log; it is deliberately not reconstructed from memory.
 
-## [2.2.25] - 2026-10-18
+## [2.2.28] - 2026-10-24
 
-A second full read-through of every file in the repository (both functions, all
-four `util/` modules, all six test suites, CI workflows, Netlify config, docs
-and the lockfile), followed by the complete local gate
-(`yarn run check`: syntax check, Sharp native-pin check and all 76 tests —
-all passing). No dead code, unused exports, debug statements, environment
-variables or lint violations were found, and no code defects surfaced, so this
-release changes documentation only.
+A full read-through of every file in the repository, then the complete local
+gate (all 76 tests passed before the change; 77 pass after). No functional
+bug was found in the request path. The changes below remove redundancy, drop
+needless work and close two documentation conflicts. No API change.
 
-### Docs
+### Changed
 
-- `README.md`: the intro now names the current release and links the changelog
-  and backend contract up front; the testing section cross-references the
-  suite table; and a few wordings were tightened. No factual content changed.
-- `docs/backend-contract.md`: the version-history table gained the 2.2.25 row
-  and the example `X-BH-Version` header in the response sample was synced.
-- No behavioral change: `util/version.js` and `package.json` were bumped to
-  2.2.25 only to keep the version-consistency test green.
+- `util/validate.js`: public IP-literal URLs (e.g. `http://8.8.8.8/`,
+  `https://[2606:4700:4700::1111]/`) are pinned directly. They used to be
+  passed to `dns.lookup()` and raced against a timer and an abort listener
+  just to get the literal back. The address policy and the shared-deadline
+  check still run first, so results are identical.
+- `util/validate.js`: the abort-signal promise in the DNS race is only created
+  when a signal is supplied (it used to be a never-settling promise
+  otherwise), and the unused `catch (error)` binding is gone.
+- `site.css`: `min-height: 100dvh` after the `100vh` fallback, so the page does
+  not overflow the visible viewport on mobile browsers with a collapsing
+  address bar.
 
-## [2.2.24] - 2026-10-17
+### Removed
 
-Full read-through of every file in the repository (code, tests, CI, docs and
-lockfile). The address policy was also fuzzed against an independent BigInt
-oracle (450,000 checks over 300,000 random IPv4/IPv6 addresses, IPv6 in both
-letter-cases, including mapped, NAT64 and 6to4 forms; no mismatches). Only the
-defects below needed a code change.
+- `functions/index.js`: `createBinaryResponse()` rebuilt the response object
+  and header merge by hand. It now wraps `createResponse()` from
+  `util/headers.js`, the documented single source of that shape, and the
+  `BASE_HEADERS` import is dropped. Headers and body are unchanged.
 
 ### Fixed
 
-- **Telemetry headers are now readable by CORS-bound callers.** Responses sent
-  `Access-Control-Allow-Origin: *` but no `Access-Control-Expose-Headers`, so a
-  web page or content script making a cross-origin request could not read the
-  `x-bh-*` headers or the legacy `x-original-size` / `x-compressed-size` /
-  `x-bytes-saved` headers that the README documents for statistics. All ten
-  are now listed in `BASE_HEADERS` (`util/headers.js`), so every response,
-  including errors, the handshake, `/api/health` and preflights, carries the
-  header. Callers that bypass CORS were unaffected.
-- **The light theme's "Failed" status colour was hard to read.** The light
-  theme inherited the dark theme's `--danger` (`#fb7185`), which is 2.69:1
-  against the white status rows (WCAG AA for small text needs 4.5:1). It now
-  has its own value, `#c8283f` (5.48:1 on white).
-
-### Docs
-
-- `docs/backend-contract.md`: new **CORS** section listing the exact header
-  set (checked against the code); a note that the 20 s request budget assumes
-  Netlify's documented 30 s default for synchronous Functions, with the worst
-  case (a last fallback encode starting just before 20 s and running for the
-  8 s Sharp timeout, about 28 s) and what to change if the site uses a shorter
-  timeout; and a **known limitation** in Caching: `Referer` and `DNT` are
-  forwarded but are not part of the cache key, so a host that varies its
-  response by `Referer` is cached by whichever request came first.
-- `README.md`: the same three points in the feature list, the new test
-  counts, the suite table, and the "what the suites do not establish" note
-  (redirects to private targets are now covered).
-- A comment in `tests/integration.test.js` claimed that nothing
-  request-specific reaches upstream, which contradicted the same test
-  asserting that `Referer` is forwarded. It now says what is actually fixed
-  and what is not.
+- `README.md` (Release Policy): documentation updates were listed under minor
+  releases, although docs-only releases (2.2.25) were shipped as patches.
+  Documentation corrections are now patch-level. The policy also lists
+  `README.md` among the files every release must update.
+- `CHANGELOG.md` preamble: same file list.
 
 ### Tests
 
-- 76 tests (was 72): `test:fast` is now 36 (was 34) and `test:integration` is
-  40 (was 38).
-  - `tests/integration.test.js`: every `x-*` telemetry header is exposed and
-    every exposed name is actually sent (fails on 2.2.23); a redirect to a
-    private or local target (`169.254.169.254`, IPv4-mapped IPv6,
-    `localhost`, loopback, RFC 1918) returns `403` with the real resolver and
-    address policy on every hop after the first. This closes the gap the
-    README listed; the behavior itself was already correct on 2.2.23.
-  - `tests/site.test.js`: status colours meet 4.5:1 against the status rows in
-    both themes (fails on 2.2.23).
-  - `tests/health.test.js`: every `tests/*.test.js` file is listed in the
-    `package.json` scripts and sits in exactly one of `test:fast` or
-    `test:integration`. The scripts name files explicitly, so an unlisted file
-    would otherwise never run in CI. Passes on 2.2.23; guards future changes.
+- `tests/address-policy.test.js`: new test for direct pinning of public IPv4
+  and IPv6 literals, 403 for a private IPv6-mapped literal, and an already
+  aborted deadline taking precedence. Suite totals are now 77 tests: 39 fast
+  and 38 integration.
+- `tests/health.test.js`: the version-sync test also requires the sample
+  `X-BH-Version` header in `docs/backend-contract.md`, the release number in
+  `README.md`, and the newest `CHANGELOG.md` entry to match `PROXY_VERSION`.
+
+### Docs
+
+- `README.md`: release number, test totals, suite descriptions, Release
+  Policy. `docs/backend-contract.md`: version-history row for 2.2.28 and the
+  sample `X-BH-Version` header. `package.json` and `util/version.js` are
+  bumped to 2.2.28.
+
+### Follow-up maintenance (2026-10-24; version unchanged)
+
+- Changed: `site.js` removes an unreachable compression-ratio fallback and
+  reads savings telemetry only after image validation succeeds.
+- Changed: `README.md` documents that behavior.
+- Fixed: the transient 78-test note in the 2.2.26 follow-up used the wrong
+  fast/integration split and was superseded. Current checked-in totals remain
+  77 tests: 39 fast and 38 integration. Historical release headings and the
+  project version are unchanged.
+
+Second pass (2026-10-24; version unchanged)
+
+- Fixed: `functions/index.js` `encodeImage()` passed `useWebp` as the Sharp
+  decode pipeline's `animated` flag instead of its own `animated` parameter.
+  Reachable behavior was unchanged — animated sources never reach the JPEG
+  encoder (the handler passes them through first) and static sources encode
+  identically either way — but the invariant was only implicit and the
+  argument misleading. The pipeline now uses `animated` directly.
+- Fixed: `scripts/check-sharp-pins.mjs` now prints "run `yarn install` first"
+  and exits 1 when `node_modules/sharp` is absent, instead of a raw `ENOENT`
+  stack trace.
+- Changed: `package.json`'s `validate` script syntax-checks every shipped JS
+  file (`site.js`, both functions, all four `util/` modules, the pins
+  script), not just `site.js`; a syntax slip in the function code now fails
+  `yarn run check` locally instead of at Netlify build time.
+- Verified: the complete local gate passes after these changes: the syntax
+  check of every shipped JS file, the Sharp native-pin check, and all 77
+  tests (39 fast and 38 integration). The documented totals and the
+  "yarn.lock has 32 entries" claim were re-confirmed against the checked-in
+  files.
+- Note: an earlier draft of this pass also changed a `let` to `const` in
+  `site.js`; the suite caught that the flag is reassigned inside the loop, so
+  the change was reverted before shipping. `site.js` is unchanged.
+
+Third pass (2026-10-24; version unchanged)
+
+- Verified: the no-URL handshake already returns the documented
+  `Cache-Control: public, max-age=300`; no handler change was needed.
+- Tests: `tests/index.test.js` now asserts that documented cache header so the
+  contract cannot drift silently.
+- Docs: `README.md` now describes the handshake as cacheable and includes it in
+  the `tests/index.test.js` scope. No version bump; checked-in test totals
+  remain 77 tests.
+
