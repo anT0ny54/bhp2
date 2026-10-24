@@ -10,7 +10,14 @@ import fs from "node:fs";
 const readJson = (path) => JSON.parse(fs.readFileSync(new URL(path, import.meta.url), "utf8"));
 
 const pkg = readJson("../package.json");
-const sharpPkg = readJson("../node_modules/sharp/package.json");
+let sharpPkg;
+try {
+  sharpPkg = readJson("../node_modules/sharp/package.json");
+} catch {
+  console.error("Sharp native pin check: node_modules/sharp is not installed.");
+  console.error("Run `yarn install` first, then re-run this check.");
+  process.exit(1);
+}
 
 const REQUIRED = [
   "@img/sharp-linux-x64",
