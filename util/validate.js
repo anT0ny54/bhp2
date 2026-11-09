@@ -66,6 +66,7 @@ function buildBlockList(entries, family) {
 
 const BLOCKED_IPV4 = buildBlockList(BLOCKED_IPV4_CIDRS, "ipv4");
 const BLOCKED_IPV6 = buildBlockList(BLOCKED_IPV6_CIDRS, "ipv6");
+const GLOBAL_UNICAST_IPV6 = buildBlockList([[IPV6_GLOBAL_UNICAST_CIDR]], "ipv6");
 
 // Callers only pass strings that net.isIP() classified as IPv4 or dotted
 // quads built from 16-bit groups, so no further format check is needed.
@@ -114,9 +115,10 @@ function isPrivateIpv6(value) {
   // loopback, deprecated IPv4-compatible (::/96), local-use NAT64
   // (64:ff9b:1::/48), discard (100::/64), ULA (fc00::/7), link-local
   // (fe80::/10), deprecated site-local (fec0::/10) and multicast (ff00::/8).
-  if ((groups[0] & 0xe000) !== 0x2000) return true;
+  const text = groups.map((x) => x.toString(16)).join(":");
+  if (!GLOBAL_UNICAST_IPV6.check(text, "ipv6")) return true;
 
-  return BLOCKED_IPV6.check(groups.map((x) => x.toString(16)).join(":"), "ipv6");
+  return BLOCKED_IPV6.check(text, "ipv6");
 }
 
 export function isPrivateIp(value) {
@@ -129,7 +131,7 @@ export function isPrivateIp(value) {
 
 const PRIVATE_HOSTNAMES = new Set(["localhost", "localhost.localdomain", "local", "ip6-localhost", "ip6-loopback"]);
 function isPrivateHost(hostname) {
-  const host = String(hostname).trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase().replace(/\.$/, "");
+  const host = String(hostname).toLowerCase().replace(/\.$/, "");
   // RFC 6761: every *.localhost name is loopback, whatever the resolver says.
   if (PRIVATE_HOSTNAMES.has(host) || host.endsWith(".localhost")) return true;
   return net.isIP(host) ? isPrivateIp(host) : false;
@@ -149,24 +151,26 @@ function parseHttpUrl(value) {
 function validateRemoteUrl(value) {
   const url = parseHttpUrl(value);
   if (!url) return { valid: false, error: INVALID_URL_ERROR, statusCode: 400 };
-  if (isPrivateHost(url.hostname)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
-  return { valid: true, url: url.toString(), hostname: url.hostname };
+  // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"), which
+  // getaddrinfo cannot resolve and net.isIP() does not accept. Strip them here so
+  // the policy check, DNS lookup and socket pinning all see the bare address.
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  if (isPrivateHost(hostname)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
+  return { valid: true, url: url.toString(), hostname };
 }
 
 // `options.signal` is the caller's shared deadline. When it fires, the DNS
 // wait is abandoned immediately (the signal's reason is thrown) instead of
 // lingering until the 2 s DNS timeout, and no result is returned for the caller
-// to act on after the deadline. `options.timeoutMs` overrides the DNS timeout.
+// to act on after the deadline.
 export async function resolveAndValidateRemoteUrl(value, options = {}) {
-  const { signal, timeoutMs = DNS_LOOKUP_TIMEOUT_MS } = options;
+  const { signal } = options;
   const validation = validateRemoteUrl(value);
   if (!validation.valid) return validation;
 
   signal?.throwIfAborted();
 
-  // URL#hostname keeps the brackets on IPv6 literals ("[2606:4700::1111]"),
-  // which getaddrinfo cannot resolve. Strip them so public IPv6 literals work.
-  const hostname = validation.hostname.replace(/^\[|\]$/g, "");
+  const { hostname } = validation;
 
   // An IP literal needs no DNS: validateRemoteUrl() already judged it with the
   // same address policy, so pin it directly instead of racing a lookup, a
@@ -184,7 +188,7 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
       // `order: "verbatim"` replaces the deprecated `verbatim: true` option.
       dns.lookup(hostname, { all: true, order: "verbatim" }),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), timeoutMs);
+        timer = setTimeout(() => reject(new Error("DNS_TIMEOUT")), DNS_LOOKUP_TIMEOUT_MS);
       }),
     ];
     if (signal) {

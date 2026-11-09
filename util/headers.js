@@ -34,6 +34,10 @@ export const BASE_HEADERS = Object.freeze({
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 });
 
+// Content type of every plain-text reply (image-endpoint errors, the handshake
+// and the health endpoint's 405), so the literal lives in one place.
+export const TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
 export function createResponse(statusCode, body = "", headers = {}) {
   return {
     statusCode,
