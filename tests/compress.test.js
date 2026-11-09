@@ -174,7 +174,7 @@ test("compressImage fallback uses at most 6 encodes, even on the 413 path", asyn
 
   const fail = await countEncodes(() => compressImage(input, true, false, 60, 0, 10));
   assert.equal(fail.result.statusCode, 413);
-  assert.ok(fail.count <= 6, `413 path used ${fail.count} encodes (was 22)`);
+  assert.ok(fail.count <= 6, `413 path used ${fail.count} encodes`);
 });
 
 test("compressImage stops with 504 once the request budget is spent", async () => {

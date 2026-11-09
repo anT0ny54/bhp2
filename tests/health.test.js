@@ -53,17 +53,16 @@ test("OPTIONS is answered with 204", async () => {
 
 // package.json lists test files explicitly, so a new *.test.js that is not added
 // to the scripts would silently never run in CI.
-test("every test file is wired into the package.json test scripts", () => {
+test("every test file is wired into exactly one of the package.json suites", () => {
   const files = readdirSync(new URL("../tests/", import.meta.url))
     .filter((name) => name.endsWith(".test.js"))
     .map((name) => `tests/${name}`)
     .sort();
-  const listed = (script) => new Set(packageJson.scripts[script].split(/\s+/).filter((part) => part.endsWith(".test.js")));
-  const all = listed("test");
+  const listed = (script) => packageJson.scripts[script].split(/\s+/).filter((part) => part.endsWith(".test.js"));
   const fast = listed("test:fast");
   const integration = listed("test:integration");
-  assert.deepEqual([...all].sort(), files, '"test" must list exactly the files in tests/');
-  for (const file of files) {
-    assert.notEqual(fast.has(file), integration.has(file), `${file} must be in exactly one of test:fast / test:integration`);
-  }
+  const all = [...fast, ...integration];
+  assert.equal(packageJson.scripts.test, "yarn run test:fast && yarn run test:integration", '"test" must run both suites');
+  assert.equal(new Set(all).size, all.length, "a test file must not be listed more than once");
+  assert.deepEqual(all.sort(), files, "test:fast and test:integration must list exactly the files in tests/, each once");
 });

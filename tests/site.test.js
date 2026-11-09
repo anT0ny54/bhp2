@@ -42,6 +42,23 @@ function makeResponse(spec, signal) {
   };
 }
 
+// Records scheduled callbacks so a test can fire the Copy URL reset by hand.
+function recordingTimers() {
+  let nextId = 0;
+  const timers = new Map();
+  return {
+    timers,
+    options: {
+      timerSet: (callback) => {
+        nextId += 1;
+        timers.set(nextId, callback);
+        return nextId;
+      },
+      timerClear: (id) => timers.delete(id),
+    },
+  };
+}
+
 function loadPage(route, options = {}) {
   const {
     writeClipboard = async () => {},
@@ -83,6 +100,7 @@ const HEALTHY = {
     headers: {
       "content-type": "image/webp",
       "x-bh-original-size": "1000",
+      "x-bh-compressed-size": "600",
       "x-bh-bytes-saved": "400",
       "cache-control": "public, max-age=86400",
     },
@@ -104,9 +122,61 @@ test("diagnostics pass for a healthy proxy and re-enable the button", async () =
   for (const id of ["reachable", "cors", "compression", "cache"]) assert.equal(page.state(id), "Passed", id);
   assert.match(page.detail("reachable"), /v9\.9\.9 · API 1/);
   assert.match(page.detail("compression"), /image\/webp · \d+ ms · 40\.0% saved/);
+  assert.equal(page.detail("cache"), "Public Cache-Control directive present");
+  assert.doesNotMatch(page.detail("cache"), /CDN|edge cache/i);
   assert.equal(page.badge(), "Proxy online");
   assert.equal(page.button().disabled, false);
   assert.equal(page.button().textContent, "Run diagnostics again");
+});
+
+test("a healthy proxy without Sharp is not badged as online", async () => {
+  const page = loadPage(router({
+    "/api/health": {
+      body: JSON.stringify({ status: "ok", version: "9.9.9", api: 1, service: "bandwidth-hero-proxy", sharp: { available: false, error: "boom" } }),
+    },
+    image: { status: 503, body: "Image processor is unavailable on the Netlify runtime." },
+  }));
+  await page.run();
+  assert.equal(page.state("reachable"), "Passed");
+  assert.equal(page.state("cors"), "Passed");
+  assert.equal(page.state("compression"), "Failed");
+  assert.equal(page.detail("compression"), "Sharp unavailable: boom");
+  assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "Compression unavailable");
+});
+
+test("successful image responses require complete and consistent size telemetry", async () => {
+  const invalidHeaders = [
+    {
+      "content-type": "image/webp",
+      "x-bh-original-size": "1000",
+      "x-bh-bytes-saved": "400",
+      "cache-control": "public, max-age=86400",
+    },
+    {
+      "content-type": "image/webp",
+      "x-bh-original-size": "1000",
+      "x-bh-compressed-size": "600",
+      "x-bh-bytes-saved": "NaN",
+      "cache-control": "public, max-age=86400",
+    },
+    {
+      "content-type": "image/webp",
+      "x-bh-original-size": "1000",
+      "x-bh-compressed-size": "600",
+      "x-bh-bytes-saved": "399",
+      "cache-control": "public, max-age=86400",
+    },
+  ];
+
+  for (const headers of invalidHeaders) {
+    const page = loadPage(router({ image: { headers } }));
+    await page.run();
+    assert.equal(page.state("compression"), "Failed");
+    assert.match(page.detail("compression"), /telemetry headers are missing or inconsistent/);
+    assert.equal(page.state("cache"), "Skipped");
+    assert.doesNotMatch(page.detail("compression"), /NaN% saved/);
+  }
 });
 
 test("a failing health check skips every later check", async () => {
@@ -124,6 +194,28 @@ test("the server's error message is shown when compression fails; cache check is
   assert.equal(page.state("compression"), "Failed");
   assert.equal(page.detail("compression"), "HTTP 504: Upstream image request timed out.");
   assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "Compression check failed");
+});
+
+test("a failed API handshake does not leave the proxy badge online", async () => {
+  const page = loadPage(router({ handshake: { status: 503, body: "API unavailable" } }));
+  await page.run();
+  assert.equal(page.state("reachable"), "Passed");
+  assert.equal(page.state("cors"), "Failed");
+  assert.equal(page.state("compression"), "Skipped");
+  assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "API handshake failed");
+});
+
+test("a non-public Cache-Control policy is reflected in the proxy badge", async () => {
+  const page = loadPage(router({
+    image: { headers: { ...HEALTHY.image.headers, "cache-control": "private, no-store" } },
+  }));
+  await page.run();
+  assert.equal(page.state("compression"), "Passed");
+  assert.equal(page.state("cache"), "Failed");
+  assert.equal(page.detail("cache"), "Cache-Control is not public");
+  assert.equal(page.badge(), "Cache check failed");
 });
 
 // These two hung forever before the deadline covered the body read: the timer
@@ -137,6 +229,7 @@ test("a handshake body that stalls after the headers times out instead of hangin
   assert.equal(page.detail("cors"), "Request timed out");
   assert.equal(page.state("compression"), "Skipped");
   assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "API handshake failed");
   assert.equal(page.button().disabled, false);
 });
 
@@ -196,16 +289,8 @@ test("text colours keep AA contrast (4.5:1) on their surfaces in both themes", (
 });
 
 test("repeated Copy URL clicks restart the feedback reset timer", async () => {
-  let nextTimerId = 0;
-  const timers = new Map();
-  const page = loadPage(router(), {
-    timerSet: (callback) => {
-      const id = ++nextTimerId;
-      timers.set(id, callback);
-      return id;
-    },
-    timerClear: (id) => timers.delete(id),
-  });
+  const { timers, options } = recordingTimers();
+  const page = loadPage(router(), options);
 
   await page.copy();
   assert.equal(page.copyLabel(), "Copied ✓");
@@ -223,16 +308,10 @@ test("repeated Copy URL clicks restart the feedback reset timer", async () => {
 
 test("an older clipboard write cannot overwrite feedback from the latest click", async () => {
   const writes = [];
-  let nextTimerId = 0;
-  const timers = new Map();
+  const { timers, options } = recordingTimers();
   const page = loadPage(router(), {
+    ...options,
     writeClipboard: () => new Promise((resolve, reject) => writes.push({ resolve, reject })),
-    timerSet: (callback) => {
-      const id = ++nextTimerId;
-      timers.set(id, callback);
-      return id;
-    },
-    timerClear: (id) => timers.delete(id),
   });
 
   const first = page.copy();
@@ -256,3 +335,37 @@ test("an older clipboard write cannot overwrite feedback from the latest click",
   assert.equal(page.copyLabel(), "Copied ✓");
   assert.equal(timers.size, 1);
 });
+
+test("a queued stale copy-reset callback cannot overwrite a newer click", async () => {
+  const writes = [];
+  let callCount = 0;
+  const { timers, options } = recordingTimers();
+  const page = loadPage(router(), {
+    ...options,
+    writeClipboard: () => {
+      callCount += 1;
+      if (callCount === 1) return Promise.resolve();
+      return new Promise((resolve) => writes.push(resolve));
+    },
+  });
+
+  await page.copy();
+  assert.equal(page.copyLabel(), "Copied ✓");
+  const staleReset = timers.values().next().value;
+
+  const latestCopy = page.copy();
+  assert.equal(page.copyLabel(), "Copying…");
+  staleReset(); // Simulate a timer callback already queued before clearTimeout.
+  assert.equal(page.copyLabel(), "Copying…");
+
+  writes[0]();
+  await latestCopy;
+  assert.equal(page.copyLabel(), "Copied ✓");
+  assert.equal(timers.size, 1, "the latest reset timer must remain armed");
+
+  staleReset();
+  assert.equal(page.copyLabel(), "Copied ✓");
+  timers.values().next().value();
+  assert.equal(page.copyLabel(), "Copy URL");
+});
+

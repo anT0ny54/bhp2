@@ -81,10 +81,7 @@ test("jpeg=1 flattens transparency onto white, not black", async () => {
   const transparent = await sharp({
     create: { width: 64, height: 64, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
   }).png().toBuffer();
-  routes.set("/alpha.png", (res) => {
-    res.writeHead(200, { "content-type": "image/png" });
-    res.end(transparent);
-  });
+  serve("/alpha.png", transparent);
 
   const response = await handler(event(`${baseUrl}/alpha.png`, { jpeg: "1" }));
   assert.equal(response.statusCode, 200, response.body);
@@ -122,10 +119,7 @@ test("animated sources pass through untouched on jpeg=1 regardless of Content-Ty
 
   // Served with an ordinary image/png Content-Type, exactly like an APNG from
   // a CDN — the old image/(gif|webp|tiff) filter would have flattened this.
-  routes.set("/anim.png", (res) => {
-    res.writeHead(200, { "content-type": "image/png" });
-    res.end(animated);
-  });
+  serve("/anim.png", animated, "image/png");
 
   const response = await handler(event(`${baseUrl}/anim.png`, { jpeg: "1" }));
   assert.equal(response.statusCode, 200, response.body);
@@ -135,10 +129,7 @@ test("animated sources pass through untouched on jpeg=1 regardless of Content-Ty
 
 test("quality=0 is honored (clamps to 1, not the default 60)", async () => {
   const input = await png(400, 300);
-  routes.set("/photo.png", (res) => {
-    res.writeHead(200, { "content-type": "image/png" });
-    res.end(input);
-  });
+  serve("/photo.png", input);
 
   const q0 = await handler(event(`${baseUrl}/photo.png`, { quality: "0" }));
   const q60 = await handler(event(`${baseUrl}/photo.png`));
@@ -179,12 +170,34 @@ test("upstream stalls surface as 504, not 500", async () => {
   }
 });
 
+test("a resolver that finishes after the shared deadline cannot start an upstream request", async () => {
+  let upstreamStarted = false;
+  routes.set("/late-dns.png", (res) => {
+    upstreamStarted = true;
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(Buffer.from("not reached"));
+  });
+  configureForTests({
+    fetchTimeoutMs: 40,
+    resolveRemoteUrl: async (url) => {
+      // Simulate a resolver that cannot be cancelled and returns after the
+      // shared deadline. requestPinned() must still refuse to open a socket.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return loopbackResolver(url);
+    },
+  });
+  try {
+    const response = await handler(event(`${baseUrl}/late-dns.png`));
+    assert.equal(response.statusCode, 504, response.body);
+    assert.equal(upstreamStarted, false, "no upstream connection may start after the deadline");
+  } finally {
+    configureForTests({ fetchTimeoutMs: 2_000, resolveRemoteUrl: loopbackResolver });
+  }
+});
+
 test("web requests return webp with telemetry headers", async () => {
   const input = await png(120, 90);
-  routes.set("/plain.png", (res) => {
-    res.writeHead(200, { "content-type": "image/png" });
-    res.end(input);
-  });
+  serve("/plain.png", input);
 
   const response = await handler(event(`${baseUrl}/plain.png`, { quality: "80" }));
   assert.equal(response.statusCode, 200, response.body);
@@ -424,6 +437,32 @@ test("a redirect into a private or local address is rejected with 403", async ()
       assert.equal(response.body, PRIVATE_HOST_ERROR, location);
       assert.equal(response.headers["cache-control"], "private, no-store", location);
     }
+  } finally {
+    configureForTests({ resolveRemoteUrl: loopbackResolver });
+  }
+});
+
+test("a redirect hostname resolved to a private address is rejected on the later hop", async () => {
+  let privateHostChecked = false;
+  routes.set("/to-private-host.png", (res) => {
+    res.writeHead(302, { location: "http://private-target.test/secret.png" });
+    res.end();
+  });
+  configureForTests({
+    resolveRemoteUrl: async (url, options) => {
+      if (new URL(url).hostname === "private-target.test") {
+        privateHostChecked = true;
+        return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
+      }
+      return loopbackResolver(url, options);
+    },
+  });
+  try {
+    const response = await handler(event(`${baseUrl}/to-private-host.png`));
+    assert.equal(privateHostChecked, true, "the redirect target must be resolved and checked");
+    assert.equal(response.statusCode, 403, response.body);
+    assert.equal(response.body, PRIVATE_HOST_ERROR);
+    assert.equal(response.headers["cache-control"], "private, no-store");
   } finally {
     configureForTests({ resolveRemoteUrl: loopbackResolver });
   }
