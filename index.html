@@ -37,7 +37,7 @@
           <div class="actions">
             <button class="primary" id="diagnostics-button" type="button">Run diagnostics</button>
           </div>
-          <p class="note">The API remains compatible with <code>url</code>, <code>quality</code>, <code>bw</code>, <code>jpeg</code>, and <code>max_width</code>.</p>
+          <p class="note">The API remains compatible with <code>url</code>, <code>quality</code> (and its legacy alias <code>l</code>), <code>bw</code>, <code>jpeg</code>, and <code>max_width</code>.</p>
 
           <div class="status-list" aria-live="polite">
             <div class="status">
@@ -57,7 +57,7 @@
             </div>
             <div class="status">
               <div class="status-icon" id="cache-icon">•</div>
-              <div><div class="status-title">Caching headers</div><div class="status-detail" id="cache-metric"></div></div>
+              <div><div class="status-title">Cache-Control policy</div><div class="status-detail" id="cache-metric"></div></div>
               <strong class="state pending" id="cache-status">Pending</strong>
             </div>
           </div>
@@ -71,7 +71,7 @@
             <div class="quick-item"><strong>WebP by default</strong><span>WebP output unless a client explicitly requests JPEG with <code>jpeg=1</code>.</span></div>
             <div class="quick-item"><strong>Bandwidth savings</strong><span>Quality and maximum-width controls are preserved.</span></div>
             <div class="quick-item"><strong>Safe fetching</strong><span>HTTP(S)-only URLs, private-IP blocking, redirect validation and input limits.</span></div>
-            <div class="quick-item"><strong>CDN friendly</strong><span>Results are cached by the Netlify CDN; cookies are never forwarded upstream.</span></div>
+            <div class="quick-item"><strong>CDN cache policy</strong><span>Responses are configured for Netlify CDN caching; cookies are never forwarded upstream.</span></div>
           </div>
         </div>
       </aside>

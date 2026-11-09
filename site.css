@@ -38,7 +38,12 @@ button{font:inherit}
 button,a{touch-action:manipulation}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
-.shell{width:min(960px,100%);margin:auto;padding:clamp(18px,4vw,44px) 16px 42px}
+/* index.html uses viewport-fit=cover, so keep the content clear of notches and
+   rounded corners. The env() insets are 0 on desktop, where the values are unchanged. */
+.shell{
+  width:min(960px,100%);margin:auto;
+  padding:max(clamp(18px,4vw,44px),env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) max(42px,env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));
+}
 .hero{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end;margin-bottom:18px}
 .brand{display:flex;gap:15px;align-items:flex-start}
 .logo{
@@ -101,7 +106,7 @@ footer a{margin:0 5px}
   .card-inner{padding:18px}
 }
 @media(max-width:430px){
-  .shell{padding:15px 10px 30px}
+  .shell{padding:max(15px,env(safe-area-inset-top,0px)) max(10px,env(safe-area-inset-right,0px)) max(30px,env(safe-area-inset-bottom,0px)) max(10px,env(safe-area-inset-left,0px))}
   .brand{gap:11px}.logo{width:45px;height:45px;border-radius:14px;font-size:21px}
   h1{font-size:29px}.lead{font-size:13px}
   .proxy{align-items:stretch;flex-direction:column}

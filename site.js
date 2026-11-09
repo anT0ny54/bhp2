@@ -53,6 +53,41 @@ const isAbort = (error) => error?.name === "AbortError";
 const readJson = (response) => response.json().catch((error) => { if (isAbort(error)) throw error; return null; });
 const readText = (response) => response.text();
 
+function readImageTelemetry(response) {
+  const readSize = (name, allowZero = false) => {
+    const raw = response.headers.get(name);
+    if (raw === null || !/^\d+$/.test(raw)) return null;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && (allowZero ? value >= 0 : value > 0) ? value : null;
+  };
+  const original = readSize("x-bh-original-size");
+  const compressed = readSize("x-bh-compressed-size");
+  const saved = readSize("x-bh-bytes-saved", true);
+  if (original === null || compressed === null || saved === null) return null;
+  return saved === Math.max(0, original - compressed) ? { original, saved } : null;
+}
+
+async function readImageCheck(response) {
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (response.ok && contentType.startsWith("image/")) {
+    // Diagnostics needs only headers. Never download an image as an error body
+    // just because its telemetry is absent or inconsistent.
+    const telemetry = readImageTelemetry(response);
+    await response.body?.cancel();
+    return {
+      telemetry,
+      message: telemetry ? "" : "Image telemetry headers are missing or inconsistent.",
+    };
+  }
+
+  try {
+    return { telemetry: null, message: (await response.text()).trim().slice(0, 160) };
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    return { telemetry: null, message: "" };
+  }
+}
+
 async function runDiagnostics() {
   const button = $("diagnostics-button");
   resetStatuses();
@@ -71,7 +106,9 @@ async function runDiagnostics() {
       healthOk ? "ok" : "fail",
       healthOk ? `v${data.version ?? "?"} · API ${data.api ?? "?"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
     );
-    setBadge(healthOk ? "ok" : "fail", healthOk ? "Proxy online" : "Proxy unreachable");
+    // Image compression is the proxy's purpose, so a proxy without Sharp is not "online".
+    if (!healthOk) setBadge("fail", "Proxy unreachable");
+    else if (!sharpOk) setBadge("fail", "Compression unavailable");
 
     if (!healthOk) {
       for (const id of diagnostics.slice(1)) setStatus(id, "skip", "Health check failed");
@@ -88,50 +125,44 @@ async function runDiagnostics() {
 
     if (!corsOk) {
       // Keep a Sharp failure already reported by the health check.
-      if (sharpOk) setStatus("compression", "skip", "Handshake check failed");
+      if (sharpOk) {
+        setStatus("compression", "skip", "Handshake check failed");
+        setBadge("fail", "API handshake failed");
+      }
       setStatus("cache", "skip", "Handshake check failed");
+      return;
+    }
+
+    // A health response that reports missing Sharp is already a definitive
+    // compression failure; do not send a second image request that could
+    // overwrite that result if the module happens to recover mid-run.
+    if (!sharpOk) {
+      setStatus("cache", "skip", "Compression unavailable");
       return;
     }
 
     // GitHub's public avatar is intentionally fetched by the proxy, not by this page.
     const sample = "https://avatars.githubusercontent.com/u/9919";
     const started = performance.now();
-    const isCompressedImage = (response) =>
-      response.ok &&
-      (response.headers.get("content-type") || "").startsWith("image/") &&
-      Number(response.headers.get("x-bh-original-size") || 0) > 0;
     // The server's own upstream deadline is 8 s, so give this request more
     // headroom than that; otherwise the page aborts first and can never show
     // the server's 504 message.
-    const { response: image, body: serverMessage } = await fetchWithTimeout(
+    const { response: image, body: imageCheck } = await fetchWithTimeout(
       `${proxyPath}?url=${encodeURIComponent(sample)}`,
-      async (response) => {
-        if (isCompressedImage(response)) {
-          // Only the headers are needed; don't download the image body.
-          await response.body?.cancel();
-          return "";
-        }
-        // On failure, surface the server's error body so a broken upstream
-        // path is diagnosable straight from the diagnostics panel.
-        try {
-          return (await response.text()).trim().slice(0, 160);
-        } catch (error) {
-          if (isAbort(error)) throw error;
-          return "";
-        }
-      },
+      readImageCheck,
       15000,
     );
     const elapsed = Math.round(performance.now() - started);
-    const compressedOk = isCompressedImage(image);
-    const compressionDetail = serverMessage ? `HTTP ${image.status}: ${serverMessage}` : `HTTP ${image.status}`;
+    const telemetry = imageCheck.telemetry;
+    const compressedOk = telemetry !== null;
+    const compressionDetail = imageCheck.message
+      ? `HTTP ${image.status}: ${imageCheck.message}`
+      : `HTTP ${image.status}`;
 
     let successDetail = "";
     if (compressedOk) {
       const type = image.headers.get("content-type") || "";
-      const original = Number(image.headers.get("x-bh-original-size") || 0);
-      const saved = Number(image.headers.get("x-bh-bytes-saved") || 0);
-      successDetail = `${type} · ${elapsed} ms · ${((saved / original) * 100).toFixed(1)}% saved`;
+      successDetail = `${type} · ${elapsed} ms · ${((telemetry.saved / telemetry.original) * 100).toFixed(1)}% saved`;
     }
 
     setStatus(
@@ -144,11 +175,13 @@ async function runDiagnostics() {
     // is only meaningful for a successful image response.
     if (!compressedOk) {
       setStatus("cache", "skip", "Image check failed");
+      setBadge("fail", "Compression check failed");
       return;
     }
     const cache = image.headers.get("cache-control") || "";
     const cacheOk = /^public,/i.test(cache);
-    setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Browser/CDN cache headers verified" : "Public Cache-Control header missing");
+    setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Public Cache-Control directive present" : "Cache-Control is not public");
+    setBadge(cacheOk ? "ok" : "fail", cacheOk ? "Proxy online" : "Cache check failed");
   } catch (error) {
     const detail = isAbort(error) ? "Request timed out" : "Connection or CORS error";
     // Results already shown (passed checks, or a failure such as "Sharp
@@ -163,7 +196,13 @@ async function runDiagnostics() {
       }
       setStatus(id, "fail", detail);
       failureShown = true;
-      if (id === "reachable") setBadge("fail", "Proxy unreachable");
+      const badgeText = {
+        reachable: "Proxy unreachable",
+        cors: "API handshake failed",
+        compression: "Compression check failed",
+        cache: "Cache check failed",
+      }[id];
+      setBadge("fail", badgeText);
     }
   } finally {
     button.disabled = false;
@@ -177,10 +216,14 @@ function clearCopyLabelTimer() {
   if (copyLabelTimer !== undefined) clearTimeout(copyLabelTimer);
   copyLabelTimer = undefined;
 }
-function flashCopyLabel(text) {
+function flashCopyLabel(text, requestId) {
   clearCopyLabelTimer();
   $("copy-button").textContent = text;
   copyLabelTimer = setTimeout(() => {
+    // clearTimeout cannot retract a callback that has already entered the
+    // task queue. Ignore stale resets so an older click cannot overwrite the
+    // feedback for a newer clipboard request.
+    if (requestId !== copyRequestId) return;
     $("copy-button").textContent = "Copy URL";
     copyLabelTimer = undefined;
   }, 1400);
@@ -196,9 +239,9 @@ $("copy-button").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(proxyUrl);
     if (requestId !== copyRequestId) return;
-    flashCopyLabel("Copied ✓");
+    flashCopyLabel("Copied ✓", requestId);
   } catch {
     if (requestId !== copyRequestId) return;
-    flashCopyLabel("Copy unavailable");
+    flashCopyLabel("Copy unavailable", requestId);
   }
 });
