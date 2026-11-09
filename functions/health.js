@@ -1,5 +1,5 @@
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { createResponse } from "../util/headers.js";
+import { createResponse, TEXT_CONTENT_TYPE } from "../util/headers.js";
 import { loadSharp } from "../util/sharp.js";
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -14,7 +14,7 @@ export async function handler(event = {}) {
     // the main proxy handler instead of returning a JSON body here.
     return createResponse(405, "Method Not Allowed", {
       allow: "GET, OPTIONS",
-      "content-type": "text/plain; charset=utf-8",
+      "content-type": TEXT_CONTENT_TYPE,
       ...NO_STORE,
     });
   }

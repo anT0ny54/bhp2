@@ -3,7 +3,7 @@ import https from "node:https";
 
 import { resolveAndValidateRemoteUrl, createPinnedLookup } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
-import { createResponse } from "../util/headers.js";
+import { createResponse, TEXT_CONTENT_TYPE } from "../util/headers.js";
 import { loadSharp } from "../util/sharp.js";
 
 // Sharp's metadata().format values mapped to real media types. AVIF and HEIC
@@ -92,7 +92,7 @@ const PRIVATE_CACHE_HEADERS = Object.freeze({
   "cache-control": "private, no-store",
 });
 const TEXT_ERROR_HEADERS = Object.freeze({
-  "content-type": "text/plain; charset=utf-8",
+  "content-type": TEXT_CONTENT_TYPE,
   ...PRIVATE_CACHE_HEADERS,
 });
 
@@ -707,7 +707,7 @@ export async function handler(event = {}) {
   const { url: rawImageUrl, legacy } = getImageUrl(event);
   if (!rawImageUrl) {
     return createResponse(200, "bandwidth-hero-proxy", {
-      "content-type": "text/plain; charset=utf-8",
+      "content-type": TEXT_CONTENT_TYPE,
       "cache-control": "public, max-age=300",
     });
   }
