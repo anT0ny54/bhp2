@@ -60,13 +60,14 @@ clamps to 1 — a present value is never mistaken for an absent one.
 | Request budget (no new fallback encode starts after it) | 20 s from request start |
 | Fallback encodes after the first encode | 5 |
 
-The request budget assumes Netlify's documented default of 30 s for
-synchronous Functions. The budget only stops *new* fallback encodes, so the
-worst case is a last encode that starts just before 20 s and runs for the 8 s
-Sharp timeout: about 28 s. If your site is configured with a lower function
-timeout, lower `REQUEST_BUDGET_MS` in `functions/index.js` to match, or the
-platform will end the request with an opaque gateway error instead of the
-proxy's `504`.
+Netlify's [current Functions documentation](https://www.netlify.com/knowledge-base/how-to-add-a-backend-api-endpoint-with-netlify-functions/)
+lists a 60 s synchronous execution limit; the effective limit can depend on the
+site and plan, so confirm the timeout your deployment actually gets. The budget
+only stops *new* fallback encodes, so the worst case is a last encode that starts
+just before 20 s and runs for the 8 s Sharp timeout: about 28 s. If your site is
+configured with a lower function timeout, lower `REQUEST_BUDGET_MS` in
+`functions/index.js` to match, or the platform will end the request with an
+opaque gateway error instead of the proxy's `504`.
 
 ## Serverless image-processing defaults
 
@@ -119,7 +120,8 @@ When `jpeg=1` is requested and the source is multi-frame (any raster
 format: GIF/WebP/TIFF/APNG/animated AVIF/HEIF — every `jpeg=1` source is
 probed for `metadata.pages` regardless of Content-Type), the original
 animated bytes are returned unmodified, because JPEG cannot carry
-animation. If those bytes exceed the 4.3 MB response target, the request fails
+animation. `bw` and `max_width` are not applied on this path, since the bytes are
+returned as they are; WebP output applies both. If those bytes exceed the 4.3 MB response target, the request fails
 with `413` rather than producing a response Netlify would reject.
 
 For WebP output, if compression would make the representation larger, the
@@ -157,9 +159,10 @@ telemetry header is sent but not exposed, or exposed but never sent.
 
 ## Error responses
 
-Errors are plain text with an appropriate status code, always carrying
-`Cache-Control: private, no-store`. Connector-level failures (the upstream
-could not be reached at all) return
+Image-endpoint errors are plain text with an appropriate status code and always
+carry `Cache-Control: private, no-store`. The health endpoint's own 405 reply
+uses `Cache-Control: no-store` instead, because its JSON body is never cached.
+Connector-level failures (the upstream could not be reached at all) return
 `502 Upstream connection failed [<code>].` with the underlying error code, so
 a broken deployment is diagnosable from the response body.
 
@@ -268,7 +271,7 @@ Netlify-Vary: query=url|quality|bw|jpeg|max_width|l
 
 Responses for unencoded legacy URLs whose own query string leaked into the
 outer one use `Netlify-Vary: query` instead, so different upstream URLs never
-share a cache entry. Errors use `private, no-store`.
+share a cache entry. Image-endpoint errors use `private, no-store`.
 
 **Known limitation:** the upstream `Accept`, `User-Agent` and
 `Accept-Language` headers are fixed so they cannot vary the cached result, but
