@@ -33,6 +33,9 @@ const FETCH_TIMEOUT_MS = 8_000;
 // It aborts the same controller as the deadline, so both report 504.
 const SOCKET_INACTIVITY_TIMEOUT_MS = 5_000;
 const MAX_REDIRECTS = 5;
+// Only these HTTP statuses define automatic redirects. Other 3xx responses
+// (notably 300 and 304) are not redirect instructions, even with Location.
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 // Conservative default for serverless memory headroom; raise only after load
 // testing. For multi-frame input Sharp counts the pixels of all frames together.
@@ -79,14 +82,14 @@ const FORWARDED_REQUEST_HEADERS = ["dnt", "referer"];
 const PUBLIC_CACHE_HEADERS = Object.freeze({
   "cache-control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800",
   "netlify-cdn-cache-control": "public, durable, s-maxage=2592000, stale-while-revalidate=604800",
-  "netlify-vary": "query=url|quality|bw|jpeg|max_width|l",
-});
-// Legacy clients that do not encode the upstream URL leak its query string
-// into the outer one as extra keys. Those keys are part of the image URL, so
-// such responses must vary on the whole query string.
-const LEGACY_PUBLIC_CACHE_HEADERS = Object.freeze({
-  ...PUBLIC_CACHE_HEADERS,
+  // The same instruction must be returned for every response from this URL.
+  // Vary on the complete query so unencoded legacy image parameters (w, h, etc.)
+  // cannot collide with a different upstream image in the shared cache.
   "netlify-vary": "query",
+  // These client headers are forwarded upstream and can change hotlink-protected
+  // or privacy-sensitive variants. Netlify respects standard Vary alongside
+  // Netlify-Vary; its Netlify-Vary header selector does not support Referer.
+  vary: "Referer, DNT",
 });
 const PRIVATE_CACHE_HEADERS = Object.freeze({
   "cache-control": "private, no-store",
@@ -141,9 +144,9 @@ function createTimeoutError(message) {
 
 // Same response shape as every other reply (util/headers.js), with the image
 // bytes base64 encoded for the Functions runtime.
-function createBinaryResponse(buffer, headers, cacheHeaders) {
+function createBinaryResponse(buffer, headers) {
   return {
-    ...createResponse(200, buffer.toString("base64"), { ...cacheHeaders, ...headers }),
+    ...createResponse(200, buffer.toString("base64"), { ...PUBLIC_CACHE_HEADERS, ...headers }),
     isBase64Encoded: true,
   };
 }
@@ -166,23 +169,23 @@ export function getImageUrl(event = {}) {
   const match = /(?:^|&)url=/.exec(raw);
   if (!match) {
     const parsed = event.queryStringParameters?.url;
-    return { url: typeof parsed === "string" ? parsed : "", legacy: false };
+    return { url: typeof parsed === "string" ? parsed : "" };
   }
 
   let value = raw.slice(match.index + match[0].length);
   if (/^https?:\/\//i.test(value)) {
     const end = value.search(PROXY_PARAMETER);
     if (end >= 0) value = value.slice(0, end);
-    return { url: value, legacy: value.includes("&") };
+    return { url: value };
   }
 
   const end = value.indexOf("&");
   if (end >= 0) value = value.slice(0, end);
   try {
     // "+" is a space in query strings; encodeURIComponent never emits it.
-    return { url: decodeURIComponent(value.replace(/\+/g, " ")), legacy: false };
+    return { url: decodeURIComponent(value.replace(/\+/g, " ")) };
   } catch {
-    return { url: value, legacy: false };
+    return { url: value };
   }
 }
 
@@ -219,6 +222,13 @@ export function parseInteger(value, fallback, min, max) {
 
 function parseBoolean(value) {
   return value === "1" || value === "true";
+}
+
+// `quality` wins whenever it is present and non-empty, so quality=0 clamps to 1
+// instead of falling through to the legacy alias. An empty `quality=` counts as
+// absent, so `l` still applies (`??` alone let "" shadow the alias).
+export function getQualityParameter(query = {}) {
+  return query.quality !== undefined && query.quality !== "" ? query.quality : query.l;
 }
 
 // Header names arrive with whatever casing the caller used.
@@ -365,9 +375,12 @@ async function fetchImage(eventHeaders, initialUrl) {
 
       const location = upstream.headers.location;
       const status = upstream.statusCode || 0;
-      if (status >= 300 && status < 400 && location) {
+      if (REDIRECT_STATUSES.has(status)) {
         // agent:false, so destroying the response closes the socket.
         upstream.destroy();
+        if (typeof location !== "string" || !location.trim()) {
+          throw createHttpError(502, "Upstream sent a redirect without a Location header.");
+        }
         if (redirect === MAX_REDIRECTS) throw createHttpError(508, "Too many upstream redirects.");
         const next = resolveRedirect(location, target);
         if (next.origin !== target.origin) {
@@ -523,25 +536,20 @@ async function encodeImage(input, { useWebp, grayscale, quality, width, animated
     .toBuffer({ resolveWithObject: true });
 }
 
-// Fallback widths, widest first. The ladder deliberately continues far below
-// 320 px so that a small explicit max_width still has narrower sizes to try.
+// Fallback widths, widest first. The complete ladder reaches 1 px so the
+// size-model can keep narrowing both capped and unrestricted requests.
 const FALLBACK_WIDTH_LADDER = Object.freeze([
-  4096, 3072, 2048, 1600, 1280, 960, 640, 320, 240, 160, 120, 80, 64, 48, 32, 16,
+  4096, 3072, 2048, 1600, 1280, 960, 640, 320, 240, 160, 120, 80, 64, 48, 32, 16, 8, 4, 2, 1,
 ]);
 
 // Widths strictly below a requested max_width (the requested width itself is
-// tried first), so max_width=100 or 320 still gets smaller sizes instead of an
-// empty list. Combined with `withoutEnlargement` this never enlarges an image.
+// tried first). The full ladder includes tiny widths so both constrained and
+// unrestricted requests can keep narrowing a very small or highly animated
+// source instead of stopping at 16 px. Combined with `withoutEnlargement`,
+// this never enlarges an image.
 export function buildFallbackWidths(maxWidth) {
   const ceiling = maxWidth > 0 ? maxWidth : Number.POSITIVE_INFINITY;
-  const widths = FALLBACK_WIDTH_LADDER.filter((width) => width < ceiling);
-  if (widths.length === 0) {
-    // max_width <= 16: halve down to 1 px rather than giving up.
-    for (let width = Math.floor(ceiling / 2); width >= 1; width = Math.floor(width / 2)) {
-      widths.push(width);
-    }
-  }
-  return widths;
+  return FALLBACK_WIDTH_LADDER.filter((width) => width < ceiling);
 }
 
 // The codec-specific floor (WebP 10, JPEG 20) prevents pointless near-zero-
@@ -569,7 +577,7 @@ export async function compressImage(
   grayscale,
   quality,
   maxWidth,
-  maxOutputBytes = settings.maxOutputBytes,
+  maxOutputBytes,
   { animated = false, deadline = Number.POSITIVE_INFINITY } = {},
 ) {
   const encode = (q, width) => encodeImage(input, { useWebp, grayscale, quality: q, width, animated });
@@ -657,7 +665,7 @@ function getOutputHeaders(contentType, originalSize, compressedSize) {
 // WebP never-enlarge fallback). Because the response is base64 encoded,
 // untouched bytes above the safety target would exceed Netlify's 6 MB buffered
 // limit and fail as an opaque gateway error, so report a clear 413 instead.
-function createOriginalResponse(source, contentType, cacheHeaders) {
+function createOriginalResponse(source, contentType) {
   const size = source.buffer.length;
   if (size > settings.maxOutputBytes) {
     throw createHttpError(413, "The source image is too large to return unmodified.");
@@ -668,7 +676,6 @@ function createOriginalResponse(source, contentType, cacheHeaders) {
       ...getSafeUpstreamHeaders(source.headers),
       ...getOutputHeaders(contentType, size, size),
     },
-    cacheHeaders,
   );
 }
 
@@ -704,7 +711,7 @@ export async function handler(event = {}) {
   }
 
   const query = event.queryStringParameters || {};
-  const { url: rawImageUrl, legacy } = getImageUrl(event);
+  const { url: rawImageUrl } = getImageUrl(event);
   if (!rawImageUrl) {
     return createResponse(200, "bandwidth-hero-proxy", {
       "content-type": TEXT_CONTENT_TYPE,
@@ -715,11 +722,8 @@ export async function handler(event = {}) {
   // WebP is the default output; only an explicit jpeg=1 / jpeg=true selects JPEG.
   const useWebp = !parseBoolean(query.jpeg);
   const grayscale = parseBoolean(query.bw);
-  // `??` (not `||`): quality=0 is a present value and must clamp to 1 instead
-  // of falling through to the legacy alias/default like an absent parameter.
-  const quality = parseInteger(query.quality ?? query.l, DEFAULT_QUALITY, 1, 100);
+  const quality = parseInteger(getQualityParameter(query), DEFAULT_QUALITY, 1, 100);
   const maxWidth = parseInteger(query.max_width, DEFAULT_MAX_WIDTH, 0, 8192);
-  const cacheHeaders = legacy ? LEGACY_PUBLIC_CACHE_HEADERS : PUBLIC_CACHE_HEADERS;
 
   try {
     const source = await fetchImage(event.headers, normalizeImageUrl(rawImageUrl));
@@ -736,7 +740,6 @@ export async function handler(event = {}) {
       return createOriginalResponse(
         source,
         detectedType || source.contentType || "application/octet-stream",
-        cacheHeaders,
       );
     }
 
@@ -762,13 +765,12 @@ export async function handler(event = {}) {
       BROWSER_SAFE_TYPES.has(detectedType) &&
       originalSatisfiesRequest(metadata, { grayscale, maxWidth })
     ) {
-      return createOriginalResponse(source, detectedType, cacheHeaders);
+      return createOriginalResponse(source, detectedType);
     }
 
     return createBinaryResponse(
       compressed,
       getOutputHeaders(useWebp ? "image/webp" : "image/jpeg", originalSize, compressed.length),
-      cacheHeaders,
     );
   } catch (error) {
     // Sharp versions can report a processing timeout by name or by message;
