@@ -26,7 +26,15 @@ const DNS_LOOKUP_TIMEOUT_MS = 2_000;
 //
 // IPv6 forms that embed an IPv4 address (IPv4-mapped, NAT64, 6to4) are judged
 // by the embedded IPv4 address instead, because a gateway would forward there.
+// A few more-specific allocations inside broad IANA special-purpose ranges are
+// globally reachable; those exceptions are listed separately and take
+// precedence over the parent deny ranges.
 // ---------------------------------------------------------------------------
+export const ALLOWED_IPV4_CIDRS = Object.freeze([
+  ["192.0.0.9/32", "Port Control Protocol Anycast (globally reachable)"],
+  ["192.0.0.10/32", "TURN Anycast (globally reachable)"],
+]);
+
 export const BLOCKED_IPV4_CIDRS = Object.freeze([
   ["0.0.0.0/8", "'This network' (RFC 1122)"],
   ["10.0.0.0/8", "Private use (RFC 1918)"],
@@ -49,6 +57,15 @@ export const BLOCKED_IPV4_CIDRS = Object.freeze([
 // the global-unicast rule in isPrivateIpv6() and are not repeated here (that
 // includes e.g. 5f00::/16, the SRv6 SID block from RFC 9602).
 export const IPV6_GLOBAL_UNICAST_CIDR = "2000::/3";
+export const ALLOWED_IPV6_CIDRS = Object.freeze([
+  ["2001:1::1/128", "Port Control Protocol Anycast (globally reachable)"],
+  ["2001:1::2/128", "TURN Anycast (globally reachable)"],
+  ["2001:1::3/128", "DNS-SD Service Registration Protocol Anycast (globally reachable)"],
+  ["2001:3::/32", "Automatic Multicast Tunneling (globally reachable)"],
+  ["2001:4:112::/48", "AS112-v6 (globally reachable)"],
+  ["2001:20::/28", "ORCHIDv2 (globally reachable)"],
+  ["2001:30::/28", "Drone Remote ID Protocol Entity Tags (globally reachable)"],
+]);
 export const BLOCKED_IPV6_CIDRS = Object.freeze([
   ["2001::/23", "IETF protocol assignments: Teredo, benchmarking, ORCHID, AMT, ... (RFC 2928)"],
   ["2001:db8::/32", "Documentation (RFC 3849)"],
@@ -64,15 +81,10 @@ function buildBlockList(entries, family) {
   return list;
 }
 
+const ALLOWED_IPV4 = buildBlockList(ALLOWED_IPV4_CIDRS, "ipv4");
 const BLOCKED_IPV4 = buildBlockList(BLOCKED_IPV4_CIDRS, "ipv4");
+const ALLOWED_IPV6 = buildBlockList(ALLOWED_IPV6_CIDRS, "ipv6");
 const BLOCKED_IPV6 = buildBlockList(BLOCKED_IPV6_CIDRS, "ipv6");
-const GLOBAL_UNICAST_IPV6 = buildBlockList([[IPV6_GLOBAL_UNICAST_CIDR]], "ipv6");
-
-// Callers only pass strings that net.isIP() classified as IPv4 or dotted
-// quads built from 16-bit groups, so no further format check is needed.
-function isPrivateIpv4(value) {
-  return BLOCKED_IPV4.check(value, "ipv4");
-}
 
 function expandIpv6(value) {
   let address = value.toLowerCase();
@@ -104,37 +116,49 @@ function isPrivateIpv6(value) {
   // embed an IPv4 address that a gateway would forward to; judge them by that
   // address so e.g. ::ffff:169.254.169.254 cannot slip past the filter.
   if (groups.slice(0, 5).every((x) => x === 0) && groups[5] === 0xffff) {
-    return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+    return isPrivateAddress(toIpv4(groups[6], groups[7]), 4);
   }
   if (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((x) => x === 0)) {
-    return isPrivateIpv4(toIpv4(groups[6], groups[7]));
+    return isPrivateAddress(toIpv4(groups[6], groups[7]), 4);
   }
-  if (groups[0] === 0x2002) return isPrivateIpv4(toIpv4(groups[1], groups[2]));
+  if (groups[0] === 0x2002) return isPrivateAddress(toIpv4(groups[1], groups[2]), 4);
 
-  // Default-deny outside global unicast (2000::/3). This covers unspecified,
-  // loopback, deprecated IPv4-compatible (::/96), local-use NAT64
-  // (64:ff9b:1::/48), discard (100::/64), ULA (fc00::/7), link-local
-  // (fe80::/10), deprecated site-local (fec0::/10) and multicast (ff00::/8).
+  // Default-deny outside global unicast (2000::/3): the first three bits of
+  // the first group must be 001. This covers unspecified, loopback, deprecated
+  // IPv4-compatible (::/96), local-use NAT64 (64:ff9b:1::/48), discard
+  // (100::/64), ULA (fc00::/7), link-local (fe80::/10), deprecated site-local
+  // (fec0::/10) and multicast (ff00::/8).
+  if ((groups[0] & 0xe000) !== 0x2000) return true;
+
   const text = groups.map((x) => x.toString(16)).join(":");
-  if (!GLOBAL_UNICAST_IPV6.check(text, "ipv6")) return true;
-
+  if (ALLOWED_IPV6.check(text, "ipv6")) return false;
   return BLOCKED_IPV6.check(text, "ipv6");
 }
 
-export function isPrivateIp(value) {
-  const address = String(value).trim().replace(/^\[/, "").replace(/\]$/, "");
-  const family = net.isIP(address);
-  if (family === 4) return isPrivateIpv4(address);
+// `family` is net.isIP(address): 4 or 6. Anything else fails closed. Callers
+// that already know the family (DNS records, the URL parser) pass it on, so
+// the address is not classified again from its text.
+function isPrivateAddress(address, family) {
+  if (family === 4) {
+    if (ALLOWED_IPV4.check(address, "ipv4")) return false;
+    return BLOCKED_IPV4.check(address, "ipv4");
+  }
   if (family === 6) return isPrivateIpv6(address);
   return true;
 }
 
+export function isPrivateIp(value) {
+  const address = String(value).trim().replace(/^\[/, "").replace(/\]$/, "");
+  return isPrivateAddress(address, net.isIP(address));
+}
+
 const PRIVATE_HOSTNAMES = new Set(["localhost", "localhost.localdomain", "local", "ip6-localhost", "ip6-loopback"]);
-function isPrivateHost(hostname) {
-  const host = String(hostname).toLowerCase().replace(/\.$/, "");
+// `family` is net.isIP(hostname): 4 or 6 for an IP literal, 0 for a name.
+function isPrivateHost(hostname, family) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
   // RFC 6761: every *.localhost name is loopback, whatever the resolver says.
   if (PRIVATE_HOSTNAMES.has(host) || host.endsWith(".localhost")) return true;
-  return net.isIP(host) ? isPrivateIp(host) : false;
+  return family !== 0 && isPrivateAddress(host, family);
 }
 
 function parseHttpUrl(value) {
@@ -155,8 +179,9 @@ function validateRemoteUrl(value) {
   // getaddrinfo cannot resolve and net.isIP() does not accept. Strip them here so
   // the policy check, DNS lookup and socket pinning all see the bare address.
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  if (isPrivateHost(hostname)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
-  return { valid: true, url: url.toString(), hostname };
+  const family = net.isIP(hostname);
+  if (isPrivateHost(hostname, family)) return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
+  return { valid: true, url: url.toString(), hostname, family };
 }
 
 // `options.signal` is the caller's shared deadline. When it fires, the DNS
@@ -170,14 +195,13 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
 
   signal?.throwIfAborted();
 
-  const { hostname } = validation;
+  const { hostname, family } = validation;
 
   // An IP literal needs no DNS: validateRemoteUrl() already judged it with the
   // same address policy, so pin it directly instead of racing a lookup, a
   // timer and an abort listener for an answer that is the literal itself.
-  const literalFamily = net.isIP(hostname);
-  if (literalFamily) {
-    return { valid: true, url: validation.url, addresses: [{ address: hostname, family: literalFamily }] };
+  if (family) {
+    return { valid: true, url: validation.url, addresses: [{ address: hostname, family }] };
   }
 
   let records;
@@ -210,11 +234,12 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
   // A lookup that finished in the same tick as the deadline must not be acted on.
   signal?.throwIfAborted();
 
-  if (
-    !Array.isArray(records) ||
-    records.length === 0 ||
-    records.some((record) => isPrivateIp(record.address))
-  ) {
+  // No answer means the name did not resolve (502), which is not the same as
+  // an answer that is private (403).
+  if (!Array.isArray(records) || records.length === 0) {
+    return { valid: false, error: DNS_RESOLUTION_ERROR, statusCode: 502 };
+  }
+  if (records.some((record) => isPrivateAddress(record.address, record.family))) {
     return { valid: false, error: PRIVATE_HOST_ERROR, statusCode: 403 };
   }
 
@@ -237,14 +262,33 @@ export async function resolveAndValidateRemoteUrl(value, options = {}) {
 // request to addresses that have already been checked by
 // resolveAndValidateRemoteUrl.
 export function createPinnedLookup(records) {
-  return function pinnedLookup(hostname, options, callback) {
+  // The hostname argument is positional and unused: every lookup answers with the pinned addresses.
+  return function pinnedLookup(_hostname, options, callback) {
+    if (typeof options === "function") {
+      callback = options;
+      options = undefined;
+    }
+
     const opts = options && typeof options === "object" ? options : {};
-    if (opts.all) {
-      callback(null, records.map(({ address, family }) => ({ address, family })));
+    const rawFamily = typeof options === "number" ? options : opts.family;
+    const wantedFamily = rawFamily === "IPv4" ? 4 : rawFamily === "IPv6" ? 6 : (rawFamily || 0);
+    const matches = wantedFamily
+      ? records.filter((record) => record.family === wantedFamily)
+      : records;
+
+    if (matches.length === 0) {
+      const error = new Error(`No address is available for family ${wantedFamily}.`);
+      error.code = "EAI_ADDRFAMILY";
+      callback(error);
       return;
     }
-    const wantedFamily = opts.family || 0;
-    const match = (wantedFamily && records.find((r) => r.family === wantedFamily)) || records[0];
+
+    if (opts.all) {
+      callback(null, matches.map(({ address, family }) => ({ address, family })));
+      return;
+    }
+
+    const [match] = matches;
     callback(null, match.address, match.family);
   };
 }
