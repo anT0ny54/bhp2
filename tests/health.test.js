@@ -11,6 +11,7 @@ const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.me
 const backendContract = readFileSync(new URL("../docs/backend-contract.md", import.meta.url), "utf8");
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+const netlifyToml = readFileSync(new URL("../netlify.toml", import.meta.url), "utf8");
 
 test("release version and feature metadata stay in sync", () => {
   const contractLines = backendContract.split(/\r?\n/).map((line) => line.trim());
@@ -21,6 +22,16 @@ test("release version and feature metadata stay in sync", () => {
   // The README names the current release and the changelog's newest entry is it.
   assert.ok(readme.includes(`**${PROXY_VERSION}**`), "README.md must name the current release");
   assert.equal(changelog.match(/^## \[([^\]]+)\]/m)?.[1], PROXY_VERSION, "CHANGELOG.md newest entry must be the current release");
+});
+
+// netlify.toml repeats these three headers for the static pages. Each must appear
+// exactly once there, with the same value util/headers.js sends from functions.
+test("netlify.toml's site-wide security headers match util/headers.js", () => {
+  for (const name of ["X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy"]) {
+    const values = [...netlifyToml.matchAll(new RegExp(`^\\s*${name} = "([^"]*)"`, "gm"))].map((m) => m[1]);
+    assert.equal(values.length, 1, `${name} must be set exactly once in netlify.toml`);
+    assert.equal(values[0], BASE_HEADERS[name.toLowerCase()], `${name} differs from util/headers.js`);
+  }
 });
 
 test("GET returns ok with version, api level and features", async () => {

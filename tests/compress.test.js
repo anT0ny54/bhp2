@@ -7,14 +7,7 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 
 import { buildFallbackWidths, compressImage } from "../functions/index.js";
-
-// Incompressible RGB noise: output size is predictable and always large, so a
-// small cap reliably pushes compressImage past the fallback-quality encode.
-async function noisePng(width, height) {
-  return sharp(crypto.randomBytes(width * height * 3), {
-    raw: { width, height, channels: 3 },
-  }).png().toBuffer();
-}
+import { noisePng } from "./fixtures.js";
 
 // 1200x900 image whose detail lives at `detailWidth` px: random noise generated
 // at that width and enlarged with nearest-neighbour. Downscaling to
@@ -95,6 +88,18 @@ for (const maxWidth of [100, 320, 800]) {
     assert.ok(width < maxWidth, `expected width < ${maxWidth}, got ${width}`);
   });
 }
+
+test("compressImage without max_width can fall below 16 px when the cap requires it", async () => {
+  const input = await detailedPng(16);
+  const cap = Math.floor((await lowestQualityWebpSize(input, 16)) / 2);
+
+  const output = await compressImage(input, true, false, 60, 0, cap);
+
+  assert.ok(output.length <= cap);
+  const { width, format } = await sharp(output).metadata();
+  assert.equal(format, "webp");
+  assert.ok(width < 16, `expected width < 16, got ${width}`);
+});
 
 test("compressImage falls back below max_width for JPEG output too", async () => {
   const input = await detailedPng(100);

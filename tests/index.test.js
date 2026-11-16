@@ -9,6 +9,7 @@ import {
   buildFallbackWidths,
   getFallbackQuality,
   getImageUrl,
+  getQualityParameter,
   normalizeImageUrl,
   originalSatisfiesRequest,
   parseInteger,
@@ -80,6 +81,17 @@ test("integer query parsing rejects partial numbers and clamps valid integers", 
   assert.equal(parseInteger(`-${"9".repeat(400)}`, 60, 1, 100), 1);
 });
 
+test("an empty quality parameter falls through to the legacy l alias", () => {
+  assert.equal(getQualityParameter({ quality: "", l: "5" }), "5");
+  assert.equal(parseInteger(getQualityParameter({ quality: "", l: "5" }), 60, 1, 100), 5);
+  // quality=0 is present: it must not fall through to l (it clamps to 1 later).
+  assert.equal(getQualityParameter({ quality: "0", l: "5" }), "0");
+  assert.equal(parseInteger(getQualityParameter({ quality: "0", l: "5" }), 60, 1, 100), 1);
+  assert.equal(getQualityParameter({ quality: "40" }), "40");
+  assert.equal(getQualityParameter({ l: "30" }), "30");
+  assert.equal(getQualityParameter({}), undefined);
+});
+
 test("fallback quality never exceeds a low requested quality", () => {
   assert.equal(getFallbackQuality(1, true), 1);
   assert.equal(getFallbackQuality(9, true), 9);
@@ -89,15 +101,15 @@ test("fallback quality never exceeds a low requested quality", () => {
   assert.equal(getFallbackQuality(60, false), 30);
 });
 
-// The exact lists for 100 and 320 are the regression guard for the old ladder,
-// which ran out of widths immediately for small max_width values (more
-// property-style checks live in tests/compress.test.js).
-test("buildFallbackWidths only narrows below the requested width", () => {
+// Exact lists cover explicit limits and the unrestricted ladder; property-style
+// checks for ordering and bounds live in tests/compress.test.js.
+test("buildFallbackWidths narrows below the requested width down to 1 px", () => {
   const all = buildFallbackWidths(0);
-  assert.equal(all.length, 16);
-  assert.deepEqual(buildFallbackWidths(100), [80, 64, 48, 32, 16]);
-  assert.deepEqual(buildFallbackWidths(320), [240, 160, 120, 80, 64, 48, 32, 16]);
+  assert.equal(all.length, 20);
+  assert.deepEqual(buildFallbackWidths(100), [80, 64, 48, 32, 16, 8, 4, 2, 1]);
+  assert.deepEqual(buildFallbackWidths(320), [240, 160, 120, 80, 64, 48, 32, 16, 8, 4, 2, 1]);
   assert.deepEqual(buildFallbackWidths(16), [8, 4, 2, 1]);
+  assert.deepEqual(buildFallbackWidths(12), [8, 4, 2, 1]);
   assert.ok(all.every((width) => width > 0));
 });
 
@@ -105,32 +117,32 @@ test("getImageUrl decodes encoded URLs once and stops at the next parameter", ()
   const image = "https://cdn.example/a.jpg?w=400&h=300";
   assert.deepEqual(
     getImageUrl({ rawQuery: `url=${encodeURIComponent(image)}&jpeg=0&bw=1&quality=60&extra=1` }),
-    { url: image, legacy: false },
+    { url: image },
   );
   // Parameter order does not matter.
   assert.deepEqual(
     getImageUrl({ rawQuery: `jpeg=0&url=${encodeURIComponent(image)}&quality=60` }),
-    { url: image, legacy: false },
+    { url: image },
   );
 });
 
 test("getImageUrl rebuilds legacy unencoded URLs up to the first proxy parameter", () => {
   assert.deepEqual(
     getImageUrl({ rawQuery: "url=http://cdn.example/a.jpg?w=400&h=300&jpeg=1&l=40" }),
-    { url: "http://cdn.example/a.jpg?w=400&h=300", legacy: true },
+    { url: "http://cdn.example/a.jpg?w=400&h=300" },
   );
-  // A legacy URL without its own "&" needs no special cache handling.
+  // A legacy URL with only one upstream query key needs no reconstruction.
   assert.deepEqual(
     getImageUrl({ rawQuery: "url=http://cdn.example/a.jpg?w=400&bw=1" }),
-    { url: "http://cdn.example/a.jpg?w=400", legacy: false },
+    { url: "http://cdn.example/a.jpg?w=400" },
   );
 });
 
 test("getImageUrl falls back to the parsed parameter and handles absence", () => {
   assert.deepEqual(getImageUrl({ queryStringParameters: { url: "https://a.example/x.png" } }),
-    { url: "https://a.example/x.png", legacy: false });
-  assert.deepEqual(getImageUrl({ rawQuery: "", queryStringParameters: {} }), { url: "", legacy: false });
-  assert.deepEqual(getImageUrl({ rawQuery: "url=&jpeg=1" }), { url: "", legacy: false });
+    { url: "https://a.example/x.png" });
+  assert.deepEqual(getImageUrl({ rawQuery: "", queryStringParameters: {} }), { url: "" });
+  assert.deepEqual(getImageUrl({ rawQuery: "url=&jpeg=1" }), { url: "" });
 });
 
 test("normalizeImageUrl unwraps the legacy 1.1.x.x/bmi/ carrier prefix and drops fragments", () => {

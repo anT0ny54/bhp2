@@ -145,6 +145,35 @@ test("a healthy proxy without Sharp is not badged as online", async () => {
   assert.equal(page.badge(), "Compression unavailable");
 });
 
+// A 200 that fails its check is "unexpected", never reported as "HTTP 200".
+test("a health response with status 200 but a non-JSON body is reported as unexpected", async () => {
+  const page = loadPage(router({ "/api/health": { status: 200, body: "<html>maintenance</html>" } }));
+  await page.run();
+  assert.equal(page.state("reachable"), "Failed");
+  assert.equal(page.detail("reachable"), "Unexpected health response");
+  for (const id of ["cors", "compression", "cache"]) assert.equal(page.state(id), "Skipped", id);
+  assert.equal(page.badge(), "Proxy unreachable");
+});
+
+test("a handshake with status 200 but no CORS header is reported as unexpected", async () => {
+  const page = loadPage(router({ handshake: { status: 200, body: "bandwidth-hero-proxy" } }));
+  await page.run();
+  assert.equal(page.state("cors"), "Failed");
+  assert.equal(page.detail("cors"), "Unexpected handshake response or missing CORS header");
+  assert.equal(page.state("compression"), "Skipped");
+  assert.equal(page.badge(), "API handshake failed");
+});
+
+test("an image request answered 200 with a non-image body is reported as unexpected", async () => {
+  const page = loadPage(router({ image: { status: 200, headers: { "content-type": "text/html" }, body: "maintenance page" } }));
+  await page.run();
+  assert.equal(page.state("compression"), "Failed");
+  assert.equal(page.detail("compression"), "Unexpected image response: maintenance page");
+  assert.doesNotMatch(page.detail("compression"), /HTTP 200/);
+  assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "Compression check failed");
+});
+
 test("successful image responses require complete and consistent size telemetry", async () => {
   const invalidHeaders = [
     {
@@ -173,7 +202,8 @@ test("successful image responses require complete and consistent size telemetry"
     const page = loadPage(router({ image: { headers } }));
     await page.run();
     assert.equal(page.state("compression"), "Failed");
-    assert.match(page.detail("compression"), /telemetry headers are missing or inconsistent/);
+    assert.match(page.detail("compression"), /^Unexpected image response: .*telemetry headers are missing or inconsistent/);
+    assert.doesNotMatch(page.detail("compression"), /HTTP 200/);
     assert.equal(page.state("cache"), "Skipped");
     assert.doesNotMatch(page.detail("compression"), /NaN% saved/);
   }
@@ -239,6 +269,39 @@ test("a health body that stalls after the headers reports a timeout, not a bad r
   assert.equal(page.state("reachable"), "Failed");
   assert.equal(page.detail("reachable"), "Request timed out");
   assert.equal(page.badge(), "Proxy unreachable");
+  assert.equal(page.button().disabled, false);
+});
+
+// Sharp missing is a real result; a later handshake timeout is still the request that
+// stopped the run, so it must be reported as the timeout, not as "Diagnostics stopped".
+test("a handshake timeout after a Sharp failure is reported on the handshake, not skipped", { timeout: 3_000 }, async () => {
+  const health = { body: JSON.stringify({ status: "ok", version: "9.9.9", api: 1, service: "bandwidth-hero-proxy", sharp: { available: false, error: "boom" } }) };
+  const page = loadPage(router({ "/api/health": health, handshake: { stallBody: true } }));
+  await page.run();
+  assert.equal(page.state("reachable"), "Passed");
+  assert.equal(page.state("cors"), "Failed");
+  assert.equal(page.detail("cors"), "Request timed out");
+  assert.equal(page.state("compression"), "Failed");
+  assert.equal(page.detail("compression"), "Sharp unavailable: boom");
+  assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "API handshake failed");
+  assert.equal(page.button().disabled, false);
+});
+
+// An HTTP error from the handshake must be badged exactly like a handshake
+// timeout in the same state (Sharp missing), so the badge does not depend on
+// how the request failed.
+test("a handshake HTTP error after a Sharp failure is badged as a handshake failure, like a timeout", async () => {
+  const health = { body: JSON.stringify({ status: "ok", version: "9.9.9", api: 1, service: "bandwidth-hero-proxy", sharp: { available: false, error: "boom" } }) };
+  const page = loadPage(router({ "/api/health": health, handshake: { status: 503, body: "API unavailable" } }));
+  await page.run();
+  assert.equal(page.state("reachable"), "Passed");
+  assert.equal(page.state("cors"), "Failed");
+  assert.equal(page.detail("cors"), "HTTP 503");
+  assert.equal(page.state("compression"), "Failed");
+  assert.equal(page.detail("compression"), "Sharp unavailable: boom");
+  assert.equal(page.state("cache"), "Skipped");
+  assert.equal(page.badge(), "API handshake failed");
   assert.equal(page.button().disabled, false);
 });
 

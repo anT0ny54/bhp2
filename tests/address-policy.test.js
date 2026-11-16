@@ -1,7 +1,7 @@
 // Address-policy tests (network-free).
 //
-// The policy lives in util/validate.js as two explicit CIDR tables (IPv4 and
-// IPv6) plus a "global unicast only" rule for IPv6. These tests verify every
+// The policy lives in util/validate.js as explicit IPv4/IPv6 allow and deny
+// CIDR tables plus a "global unicast only" rule for IPv6. These tests verify every
 // table entry at its boundaries, using independent BigInt arithmetic rather
 // than the implementation's own matching, and then pin a set of hand-written
 // fixtures taken from the IANA special-purpose registries.
@@ -9,9 +9,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ALLOWED_IPV4_CIDRS,
+  ALLOWED_IPV6_CIDRS,
   BLOCKED_IPV4_CIDRS,
   BLOCKED_IPV6_CIDRS,
   IPV6_GLOBAL_UNICAST_CIDR,
+  createPinnedLookup,
   isPrivateIp,
   resolveAndValidateRemoteUrl,
 } from "../util/validate.js";
@@ -51,12 +54,15 @@ function toRange(cidr, bits, parse) {
 
 const V4_RANGES = BLOCKED_IPV4_CIDRS.map(([cidr]) => toRange(cidr, 32, parse4));
 const V6_RANGES = BLOCKED_IPV6_CIDRS.map(([cidr]) => toRange(cidr, 128, parse6));
+const V4_ALLOWED_RANGES = ALLOWED_IPV4_CIDRS.map(([cidr]) => toRange(cidr, 32, parse4));
+const V6_ALLOWED_RANGES = ALLOWED_IPV6_CIDRS.map(([cidr]) => toRange(cidr, 128, parse6));
 const GLOBAL_UNICAST = toRange(IPV6_GLOBAL_UNICAST_CIDR, 128, parse6);
 
 const inAny = (ranges, n) => ranges.some((r) => n >= r.first && n <= r.last);
-const expectedBlocked4 = (n) => inAny(V4_RANGES, n);
+const expectedBlocked4 = (n) => inAny(V4_RANGES, n) && !inAny(V4_ALLOWED_RANGES, n);
 const expectedBlocked6 = (n) =>
-  n < GLOBAL_UNICAST.first || n > GLOBAL_UNICAST.last || inAny(V6_RANGES, n);
+  (n < GLOBAL_UNICAST.first || n > GLOBAL_UNICAST.last || inAny(V6_RANGES, n))
+  && !inAny(V6_ALLOWED_RANGES, n);
 
 // --- table-driven boundary tests -------------------------------------------
 
@@ -102,7 +108,7 @@ test("IPv6 global-unicast boundary: only 2000::/3 is a candidate", () => {
 });
 
 test("policy tables are valid: no duplicate or overlapping entries", () => {
-  for (const ranges of [V4_RANGES, V6_RANGES]) {
+  for (const ranges of [V4_RANGES, V6_RANGES, V4_ALLOWED_RANGES, V6_ALLOWED_RANGES]) {
     const sorted = [...ranges].sort((a, b) => (a.first < b.first ? -1 : 1));
     for (let i = 1; i < sorted.length; i += 1) {
       assert.ok(sorted[i].first > sorted[i - 1].last, `${sorted[i - 1].cidr} overlaps ${sorted[i].cidr}`);
@@ -115,6 +121,68 @@ test("policy tables are valid: no duplicate or overlapping entries", () => {
 });
 
 // --- hand-written fixtures (independent of the tables above) ----------------
+
+test("more-specific globally reachable IANA allocations are not blocked by parent ranges", async () => {
+  const allowed4 = ALLOWED_IPV4_CIDRS.map(([cidr]) => cidr.split("/")[0]);
+  for (const ip of allowed4) assert.equal(isPrivateIp(ip), false, ip);
+  for (const ip of ["192.0.0.8", "192.0.0.11", "192.0.0.170", "192.0.0.171"]) {
+    assert.equal(isPrivateIp(ip), true, ip);
+  }
+
+  const allowed6 = [
+    "2001:1::1", "2001:1::2", "2001:1::3", "2001:3::1",
+    "2001:4:112::1", "2001:20::1", "2001:30::1",
+  ];
+  for (const ip of allowed6) assert.equal(isPrivateIp(ip), false, ip);
+  for (const ip of ["2001::1", "2001:1::4", "2001:2::1", "2001:4:111::1", "2001:40::1"]) {
+    assert.equal(isPrivateIp(ip), true, ip);
+  }
+
+  for (const ip of ["192.0.0.9", "192.0.0.10", "[2001:1::1]", "[2001:20::1]"]) {
+    const result = await resolveAndValidateRemoteUrl(`https://${ip}/image.png`);
+    assert.equal(result.valid, true, `${ip} must pass the URL validation path`);
+    assert.equal(result.addresses.length, 1, `${ip} must be pinned as a literal`);
+  }
+
+  // The exceptions are intentionally more specific than their parent deny ranges.
+  assert.ok(ALLOWED_IPV4_CIDRS.every(([cidr]) =>
+    V4_RANGES.some((range) => {
+      const allowed = toRange(cidr, 32, parse4);
+      return allowed.first >= range.first && allowed.last <= range.last;
+    }),
+  ));
+  assert.ok(ALLOWED_IPV6_CIDRS.every(([cidr]) =>
+    V6_RANGES.some((range) => {
+      const allowed = toRange(cidr, 128, parse6);
+      return allowed.first >= range.first && allowed.last <= range.last;
+    }),
+  ));
+
+  // Check every exception's full boundaries, not just one address from each
+  // allocation, and verify that the immediately adjacent addresses retain
+  // the parent-range deny policy (except where another explicit exception is
+  // adjacent, as with the two IPv4 anycasts).
+  for (const [ranges, format, max, expectedBlocked] of [
+    [V4_ALLOWED_RANGES, format4, 0xffffffffn, expectedBlocked4],
+    [V6_ALLOWED_RANGES, format6, (1n << 128n) - 1n, expectedBlocked6],
+  ]) {
+    for (const range of ranges) {
+      const samples = new Set([range.first, range.last]);
+      if (range.first < range.last) {
+        samples.add(range.first + 1n);
+        samples.add((range.first + range.last) / 2n);
+      }
+      for (const n of samples) {
+        assert.equal(isPrivateIp(format(n)), false, `${range.cidr}: ${format(n)} must be allowed`);
+      }
+      for (const n of [range.first - 1n, range.last + 1n]) {
+        if (n < 0n || n > max) continue;
+        assert.equal(isPrivateIp(format(n)), expectedBlocked(n),
+          `${range.cidr}: neighbour ${format(n)} classified incorrectly`);
+      }
+    }
+  }
+});
 
 test("IPv4 documentation, benchmarking, relay and reserved ranges are rejected", () => {
   for (const ip of [
@@ -150,7 +218,7 @@ test("special-purpose IPv6 ranges are rejected", () => {
     "2001:db8::1", "2001:db8:ffff::1", //         documentation
     "3fff::1", "3fff:fff:ffff::1", //             documentation (RFC 9637)
     "2001::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
-    "2001:2::1", "2001:10::1", "2001:20::1", //   benchmarking, ORCHID, ORCHIDv2
+    "2001:2::1", "2001:10::1", //                benchmarking, deprecated ORCHID
     "100::1", //                                  discard-only
     "64:ff9b:1::1", //                            local-use NAT64
     "5f00::1", //                                 SRv6 SIDs
@@ -178,12 +246,15 @@ test("embedded-IPv4 IPv6 forms are judged by the embedded address", () => {
     ["::ffff:c000:201", true],
     ["::ffff:127.0.0.1", true],
     ["::ffff:8.8.8.8", false],
+    ["::ffff:192.0.0.9", false], // globally reachable PCP Anycast exception
     ["64:ff9b::c000:201", true], //   NAT64 -> TEST-NET-1
     ["64:ff9b::a9fe:a9fe", true], //  NAT64 -> metadata address
     ["64:ff9b::808:808", false], //   NAT64 -> 8.8.8.8
+    ["64:ff9b::c000:9", false], //     NAT64 -> globally reachable PCP Anycast
     ["2002:c000:201::1", true], //    6to4  -> TEST-NET-1
     ["2002:7f00:1::1", true], //      6to4  -> loopback
     ["2002:808:808::1", false], //    6to4  -> 8.8.8.8
+    ["2002:c000:9::1", false], //     6to4  -> globally reachable PCP Anycast
   ];
   for (const [ip, blocked] of cases) {
     assert.equal(isPrivateIp(ip), blocked, ip);
@@ -193,6 +264,21 @@ test("embedded-IPv4 IPv6 forms are judged by the embedded address", () => {
 test("malformed addresses fail closed", () => {
   for (const value of ["", "not-an-ip", "1.2.3", "1.2.3.4.5", "256.1.1.1", "2001:db8:::1", "fe80::1%eth0"]) {
     assert.equal(isPrivateIp(value), true, JSON.stringify(value));
+  }
+});
+
+// An empty answer means the name did not resolve. It is not a private address,
+// so it must not be reported as 403 (docs/backend-contract.md: 502 for DNS failure).
+test("a DNS answer with no addresses is a resolution failure (502), not a private host (403)", async () => {
+  const dns = (await import("node:dns/promises")).default;
+  const realLookup = dns.lookup;
+  dns.lookup = async () => [];
+  try {
+    const result = await resolveAndValidateRemoteUrl("http://dns-empty.test/a.png");
+    assert.equal(result.valid, false);
+    assert.equal(result.statusCode, 502);
+  } finally {
+    dns.lookup = realLookup;
   }
 });
 
@@ -211,3 +297,42 @@ test("public IP literals are pinned directly without DNS; the deadline still win
     /deadline/,
   );
 });
+
+test("pinned DNS lookup honours requested family for single and all results", () => {
+  const records = [
+    { address: "2001:4860:4860::8888", family: 6 },
+    { address: "8.8.8.8", family: 4 },
+    { address: "2001:4860:4860::8844", family: 6 },
+  ];
+  const lookup = createPinnedLookup(records);
+
+  lookup("proxy.test", { family: 4 }, (error, address, family) => {
+    assert.ifError(error);
+    assert.equal(address, "8.8.8.8");
+    assert.equal(family, 4);
+  });
+  lookup("proxy.test", 6, (error, address, family) => {
+    assert.ifError(error);
+    assert.equal(address, "2001:4860:4860::8888");
+    assert.equal(family, 6);
+  });
+  lookup("proxy.test", { family: "IPv6", all: true }, (error, addresses) => {
+    assert.ifError(error);
+    assert.deepEqual(addresses, [records[0], records[2]]);
+  });
+  lookup("proxy.test", { all: true, family: "IPv4" }, (error, addresses) => {
+    assert.ifError(error);
+    assert.deepEqual(addresses, [records[1]]);
+  });
+  lookup("proxy.test", (error, address, family) => {
+    assert.ifError(error);
+    assert.equal(address, records[0].address);
+    assert.equal(family, records[0].family);
+  });
+
+  const ipv4OnlyLookup = createPinnedLookup([records[1]]);
+  ipv4OnlyLookup("proxy.test", { family: 6 }, (error) => {
+    assert.equal(error?.code, "EAI_ADDRFAMILY");
+  });
+});
+

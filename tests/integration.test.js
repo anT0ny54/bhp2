@@ -11,11 +11,11 @@ import sharp from "sharp";
 
 import { handler, configureForTests, resetConfigForTests } from "../functions/index.js";
 import { PRIVATE_HOST_ERROR, resolveAndValidateRemoteUrl } from "../util/validate.js";
+import { noisePng } from "./fixtures.js";
 
 let server;
 let baseUrl;
 let otherOriginUrl;
-let port;
 let routes;
 
 // Pins every hostname to the loopback test server (see the header comment).
@@ -24,12 +24,6 @@ const loopbackResolver = async (url) => ({
   url,
   addresses: [{ address: "127.0.0.1", family: 4 }],
 });
-
-function png(width, height) {
-  return sharp(crypto.randomBytes(width * height * 3), {
-    raw: { width, height, channels: 3 },
-  }).png().toBuffer();
-}
 
 before(async () => {
   routes = new Map();
@@ -43,7 +37,7 @@ before(async () => {
     route(res, req);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  port = server.address().port;
+  const { port } = server.address();
   baseUrl = `http://proxy.test:${port}`;
   otherOriginUrl = `http://other.test:${port}`;
 
@@ -128,7 +122,7 @@ test("animated sources pass through untouched on jpeg=1 regardless of Content-Ty
 });
 
 test("quality=0 is honored (clamps to 1, not the default 60)", async () => {
-  const input = await png(400, 300);
+  const input = await noisePng(400, 300);
   serve("/photo.png", input);
 
   const q0 = await handler(event(`${baseUrl}/photo.png`, { quality: "0" }));
@@ -157,6 +151,47 @@ test("redirects to unsupported schemes return 502", async () => {
     assert.equal(response.statusCode, 502, `location=${location}: ${response.body}`);
     assert.match(response.body, /invalid redirect location/i, `location=${location}`);
   }
+});
+
+test("standard redirect statuses without Location are reported as upstream gateway failures", async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    routes.set(`/redirect-without-location-${status}.png`, (res) => {
+      res.writeHead(status, { "content-type": "text/plain" });
+      res.end();
+    });
+    const response = await handler(event(`${baseUrl}/redirect-without-location-${status}.png`));
+    assert.equal(response.statusCode, 502, `status=${status}: ${response.body}`);
+    assert.match(response.body, /redirect.*location/i);
+  }
+
+  routes.set("/redirect-empty-location.png", (res) => {
+    res.writeHead(301, { location: "" });
+    res.end();
+  });
+  const emptyLocation = await handler(event(`${baseUrl}/redirect-empty-location.png`));
+  assert.equal(emptyLocation.statusCode, 502, emptyLocation.body);
+  assert.match(emptyLocation.body, /redirect.*location/i);
+});
+
+test("non-redirect 3xx statuses do not follow a Location header", async () => {
+  let followedLocation = false;
+  routes.set("/must-not-follow-3xx-location.png", (res) => {
+    followedLocation = true;
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end();
+  });
+
+  for (const status of [300, 304]) {
+    routes.set(`/non-redirect-${status}.png`, (res) => {
+      res.writeHead(status, { location: "/must-not-follow-3xx-location.png" });
+      res.end();
+    });
+    const response = await handler(event(`${baseUrl}/non-redirect-${status}.png`));
+    assert.equal(response.statusCode, 502, `status=${status}: ${response.body}`);
+    assert.match(response.body, new RegExp(`upstream image request failed with status ${status}`, "i"));
+  }
+
+  assert.equal(followedLocation, false, "non-redirect 3xx Location must not be requested");
 });
 
 test("upstream stalls surface as 504, not 500", async () => {
@@ -196,7 +231,7 @@ test("a resolver that finishes after the shared deadline cannot start an upstrea
 });
 
 test("web requests return webp with telemetry headers", async () => {
-  const input = await png(120, 90);
+  const input = await noisePng(120, 90);
   serve("/plain.png", input);
 
   const response = await handler(event(`${baseUrl}/plain.png`, { quality: "80" }));
@@ -225,7 +260,7 @@ test("a body that stalls mid-download surfaces as 504 via the socket timer", asy
 });
 
 test("jpeg=true selects JPEG like jpeg=1; anything else stays WebP", async () => {
-  serve("/flags.png", await png(64, 48));
+  serve("/flags.png", await noisePng(64, 48));
   for (const [jpeg, type] of [["true", "image/jpeg"], ["1", "image/jpeg"], ["0", "image/webp"], [undefined, "image/webp"]]) {
     const query = jpeg === undefined ? {} : { jpeg };
     const response = await handler(event(`${baseUrl}/flags.png`, query));
@@ -241,7 +276,7 @@ test("legacy unencoded URLs keep their own query string and vary on the full que
     res.writeHead(200, { "content-type": "image/png" });
     res.end(input);
   });
-  const input = await png(40, 30);
+  const input = await noisePng(40, 30);
   const response = await handler({
     httpMethod: "GET",
     // What Netlify delivers for ?url=http://.../legacy.png?w=1&h=2&jpeg=0&quality=50
@@ -251,10 +286,11 @@ test("legacy unencoded URLs keep their own query string and vary on the full que
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(requested, "/legacy.png?w=1&h=2");
   assert.equal(response.headers["netlify-vary"], "query");
+  assert.equal(response.headers.vary, "Referer, DNT");
 });
 
 test("encoded URLs (Bandwidth Guardian) are decoded once from the raw query", async () => {
-  serve("/enc.png?a=1&b=2", await png(40, 30));
+  serve("/enc.png?a=1&b=2", await noisePng(40, 30));
   const imageUrl = `${baseUrl}/enc.png?a=1&b=2`;
   const response = await handler({
     httpMethod: "GET",
@@ -263,7 +299,8 @@ test("encoded URLs (Bandwidth Guardian) are decoded once from the raw query", as
   });
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(response.headers["content-type"], "image/webp");
-  assert.equal(response.headers["netlify-vary"], "query=url|quality|bw|jpeg|max_width|l");
+  assert.equal(response.headers["netlify-vary"], "query");
+  assert.equal(response.headers.vary, "Referer, DNT");
 });
 
 test("upstream gets fixed Accept/User-Agent/Accept-Language and never the client's Cookie", async () => {
@@ -273,13 +310,14 @@ test("upstream gets fixed Accept/User-Agent/Accept-Language and never the client
     res.writeHead(200, { "content-type": "image/png" });
     res.end(input);
   });
-  const input = await png(20, 20);
+  const input = await noisePng(20, 20);
   const response = await handler(event(`${baseUrl}/headers.png`, {}, {
     Accept: "image/jxl,*/*",
     "User-Agent": "Mozilla/5.0 (Linux; Android 14) Mobile ClientSpecific/1.0",
     "Accept-Language": "id-ID,id;q=0.9",
     Cookie: "session=proxy-origin-secret",
     Referer: "https://news.example/",
+    DNT: "1",
   }));
   assert.equal(response.statusCode, 200, response.body);
   assert.doesNotMatch(seen.accept, /jxl/);
@@ -288,14 +326,17 @@ test("upstream gets fixed Accept/User-Agent/Accept-Language and never the client
   assert.doesNotMatch(seen["user-agent"], /ClientSpecific/);
   assert.equal(seen["accept-language"], "en-US,en;q=0.9");
   assert.equal(seen.referer, "https://news.example/");
-  // Accept, User-Agent and Accept-Language are fixed. Only Referer and DNT are
-  // client-specific, and neither is part of the CDN cache key (see the
-  // Caching section of docs/backend-contract.md).
+  assert.equal(seen.dnt, "1");
+  assert.equal(response.headers.vary, "Referer, DNT");
+  assert.equal(response.headers["netlify-vary"], "query");
+  // Accept, User-Agent and Accept-Language are fixed. Referer and DNT are
+  // forwarded and included in Vary so caches isolate those client-specific
+  // response variants (see docs/backend-contract.md).
   assert.match(response.headers["cache-control"], /^public,/);
 });
 
 test("Referer is kept on same-origin redirects and stripped on cross-origin ones", async () => {
-  const input = await png(20, 20);
+  const input = await noisePng(20, 20);
   const seen = {};
   routes.set("/hop-same.png", (res) => { res.writeHead(302, { location: "/hop-final-same.png" }); res.end(); });
   routes.set("/hop-cross.png", (res) => { res.writeHead(302, { location: `${otherOriginUrl}/hop-final-cross.png` }); res.end(); });
@@ -328,6 +369,8 @@ test("WebP never-enlarge returns browser-safe originals with their detected type
   const response = await handler(event(`${baseUrl}/small.jpg`));
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(response.headers["content-type"], "image/jpeg");
+  assert.equal(response.headers["netlify-vary"], "query");
+  assert.equal(response.headers.vary, "Referer, DNT");
   assert.equal(Buffer.from(response.body, "base64").equals(jpeg), true);
 });
 
@@ -344,7 +387,7 @@ test("non-browser formats are always served as WebP, even when larger", async ()
 test("source above the input size limit returns 413", async () => {
   configureForTests({ maxImageBytes: 1_000 });
   try {
-    serve("/huge.png", await png(200, 200));
+    serve("/huge.png", await noisePng(200, 200));
     const response = await handler(event(`${baseUrl}/huge.png`));
     assert.equal(response.statusCode, 413, response.body);
   } finally {
@@ -469,7 +512,7 @@ test("a redirect hostname resolved to a private address is rejected on the later
 });
 
 test("every x-* telemetry header is exposed to cross-origin readers", async () => {
-  serve("/expose.png", await png(60, 40));
+  serve("/expose.png", await noisePng(60, 40));
   const response = await handler(event(`${baseUrl}/expose.png`));
   assert.equal(response.statusCode, 200, response.body);
   const exposed = response.headers["access-control-expose-headers"]
