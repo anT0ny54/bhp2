@@ -27,6 +27,13 @@ const REQUIRED = [
 ];
 
 const errors = [];
+const expectedSharpVersion = pkg.dependencies?.sharp;
+if (!expectedSharpVersion) {
+  errors.push("sharp: not pinned in package.json dependencies");
+} else if (sharpPkg.version !== expectedSharpVersion) {
+  errors.push(`sharp: package.json pins ${expectedSharpVersion} but installed sharp is ${sharpPkg.version}`);
+}
+
 for (const name of REQUIRED) {
   const expected = pkg.optionalDependencies?.[name];
   const actual = sharpPkg.optionalDependencies?.[name];
@@ -38,10 +45,10 @@ for (const name of REQUIRED) {
 }
 
 if (errors.length > 0) {
-  console.error("Sharp native pin mismatch:");
+  console.error("Sharp version/pin mismatch:");
   for (const error of errors) console.error(`  - ${error}`);
-  console.error("Bump the four @img/* pins together with sharp.");
+  console.error("Install the exact sharp and @img/* versions declared in package.json; when upgrading, bump the native pins together with sharp.");
   process.exit(1);
 }
 
-console.log(`Sharp native pins match sharp ${sharpPkg.version}.`);
+console.log(`Sharp ${sharpPkg.version} and its native pins match package.json.`);
