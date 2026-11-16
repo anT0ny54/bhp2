@@ -23,11 +23,13 @@
   status = 200
   force = true
 
-# NOTE: CORS/security headers for /api/* responses are set inside the
-# functions from util/headers.js (the single source of truth). Do NOT
-# re-add them here — the hand-copied duplication between this file and
-# util/headers.js is exactly the drift pattern that caused regressions
-# in 2.2.4/2.2.6.
+# NOTE: CORS headers for /api/* responses are set inside the functions from
+# util/headers.js (the single source of truth). Do NOT re-add CORS headers here:
+# the hand-copied duplication between this file and util/headers.js is the drift
+# pattern that caused regressions in 2.2.4/2.2.6.
+# The three security headers in the /* block below also match /api/* by path.
+# They are needed for the static pages, and they must carry the same values as
+# util/headers.js; tests/health.test.js fails if they drift apart.
 
 [[headers]]
   for = "/*"

@@ -25,7 +25,7 @@ The current release is **2.2.28** (see the
   or `jpeg=true` selects JPEG; Bandwidth Guardian always sends `jpeg=0`
 - **JPEG output** with `jpeg=1` / `jpeg=true` (mozjpeg, progressive)
 - **Grayscale conversion** with `bw=1`
-- **Quality control**: `quality` (1–100, default 60; values below 1 clamp to 1, so `quality=0` ⇒ 1) plus legacy alias `l`
+- **Quality control**: `quality` (1–100, default 60; values below 1 clamp to 1, so `quality=0` ⇒ 1) plus legacy alias `l` (an empty `quality=` counts as absent, so `l` applies)
 - **Maximum-width resizing** (`max_width`, 0 = no limit, capped at 8192; never
   enlarges)
 - **EXIF auto-orientation**; metadata is stripped from re-encoded output
@@ -54,23 +54,26 @@ The current release is **2.2.28** (see the
   then narrower widths chosen by a size model (size ∝ width^k, re-fitted from
   each measurement). At most 5 fallback encodes run, and none starts after
   the 20 s request budget (`504`). Fallback widths are always strictly below
-  a requested `max_width` and continue down to 16 px (1 px for tiny limits);
-  images are never enlarged. The worst case is about 28 s (the 20 s budget plus
+  a requested `max_width` and continue down to 1 px, including when
+  `max_width=0` is unrestricted; images are never enlarged. The worst case is about 28 s (the 20 s budget plus
   one 8 s Sharp pipeline). Netlify's [current Functions documentation](https://www.netlify.com/knowledge-base/how-to-add-a-backend-api-endpoint-with-netlify-functions/)
   lists a 60 s synchronous execution limit; verify the limit for your site and
   plan, and lower `REQUEST_BUDGET_MS` if your deployment has a lower cap (see
   the [contract](docs/backend-contract.md#limits))
 - **Legacy URL support**: the image URL is read from the raw query string.
   Encoded URLs (Bandwidth Guardian) are decoded once; unencoded legacy URLs
-  keep their own query string up to the first proxy parameter and are cached
-  with `Netlify-Vary: query`
-- **Manual redirect handling**: bounded at 5 hops; every hop is re-resolved,
+  keep their own query string up to the first proxy parameter. All image
+  responses vary on the complete query so those legacy parameters stay in the
+  cache key too
+- **Manual redirect handling**: follows only standard redirect statuses
+  (301/302/303/307/308), bounded at 5 hops; every hop is re-resolved,
   re-validated and re-pinned; `Referer` is stripped on cross-origin hops
 - **SSRF protection**: HTTP/HTTPS-only URLs; `localhost` and every
   `*.localhost` name are rejected outright; an explicit, table-driven
   address policy covering private, loopback, link-local, CGNAT, documentation,
   benchmarking, multicast and reserved IPv4 **and** IPv6 ranges (IPv6 allows
-  only global unicast `2000::/3` minus special-purpose carve-outs; IPv6 forms
+  only global unicast `2000::/3` minus special-purpose carve-outs, except for
+  more-specific allocations IANA marks globally reachable; IPv6 forms
   that embed an IPv4 address — IPv4-mapped, NAT64 and 6to4 — are judged by the
   embedded address). The exact ranges are listed in the
   [address policy](docs/backend-contract.md#address-policy). DNS is validated
@@ -91,10 +94,9 @@ The current release is **2.2.28** (see the
   `Accept-Language` headers (never the client's, so a CDN that negotiates or
   sniffs on them cannot put one client's variant into the shared cache), plus
   the client's `DNT` and `Referer` (for hotlink protection). **Cookies are
-  never forwarded.** `Referer` and `DNT` are not part of the CDN cache key, so a
-  host that serves different images per `Referer` is cached by whichever request
-  came first (see the
-  [caching note](docs/backend-contract.md#caching))
+  never forwarded.** The image response uses `Vary: Referer, DNT` so upstream
+  variants that depend on those headers remain separate in caches (see the
+  [caching contract](docs/backend-contract.md#caching))
 - **Serverless processing defaults**: WebP quality 60; each
   Sharp/libvips pipeline has an 8 s processing timeout. Sharp excludes time
   waiting for a libuv worker, and this is a per-pipeline limit, not a whole-
@@ -111,8 +113,9 @@ The current release is **2.2.28** (see the
   `Access-Control-Expose-Headers` for the telemetry headers so CORS-bound
   callers can read them
 - **Caching**: 24 h browser / 30 day Netlify CDN for every image response;
-  `private, no-store` for every image-endpoint error; `Netlify-Vary` pins the cache key to
-  the extension query params (the whole query for unencoded legacy URLs)
+  `private, no-store` for every image-endpoint error; one consistent
+  `Netlify-Vary: query` key covers encoded and legacy URLs, while
+  `Vary: Referer, DNT` separates upstream variants that depend on those headers
 - **Telemetry headers**: `x-bh-*` plus legacy `x-original-size`,
   `x-compressed-size`, `x-bytes-saved`
 - **Cacheable handshake response** (`bandwidth-hero-proxy`, 5-minute browser cache) for requests without a `url`
@@ -121,7 +124,7 @@ The current release is **2.2.28** (see the
 - **Built-in diagnostics page** with reachability, CORS/handshake, live image
   compression, and a `Cache-Control: public` policy check; checks that could not
   run are shown as "Skipped", and the badge says "Proxy online" only when all
-  checks pass. The cache check verifies the response directive only; it does
+  checks pass. A 200 response that fails its check is reported as unexpected rather than as an HTTP status. The cache check verifies the response directive only; it does
   not claim that a Netlify edge cache served the response. To verify actual CDN
   behavior on a deployment, inspect the response's `Cache-Status` header (for
   example, `hit` versus `fwd=miss`) as described in the
@@ -179,17 +182,18 @@ Full contract (status codes, limits, headers):
 > `optionalDependencies` to the versions that `sharp` itself declares, or the
 > installed native binary will not match the JavaScript wrapper. CI enforces
 > this through `yarn run check`, which runs `yarn run check:sharp-pins`
-> (`scripts/check-sharp-pins.mjs`) and fails the build if the pins drift from
-> the installed `sharp`'s own `optionalDependencies`. Dependabot groups `sharp` and `@img/sharp-*` into
-> one PR so bumps arrive together.
+> (`scripts/check-sharp-pins.mjs`) and verifies that the installed `sharp`
+> version exactly matches `package.json`, and that the four installed native
+> package pins match the versions required by that Sharp release. Dependabot
+> groups `sharp` and `@img/sharp-*` into one PR so bumps arrive together.
 
 ## 🧪 Testing
 
 ```bash
 yarn install --frozen-lockfile  # installs the exact dependency versions in yarn.lock
-yarn test                  # all 84 tests across the six checked-in suites
-yarn test:fast             # 44 network-free tests (address policy, handlers, health, diagnostics page)
-yarn test:integration      # 40 Sharp/loopback tests (compression + request integration)
+yarn test                  # all 97 tests across the six checked-in suites
+yarn test:fast             # 54 network-free tests (address policy, handlers, health, diagnostics page)
+yarn test:integration      # 43 Sharp/loopback tests (compression + request integration)
 yarn run check             # full local gate (syntax check of every shipped JS file + Sharp native-pin check + all tests)
 ```
 
@@ -206,8 +210,10 @@ counts are the current totals and must be updated when tests are added or remove
 > encoder, including multi-frame fixtures. Run them with the exact dependency
 > versions in `yarn.lock` (`yarn install --frozen-lockfile`); substituting a
 > system-wide or otherwise different Sharp release can produce misleading
-> animated-image fixture failures. The native-package pin check also verifies
-> that the installed Sharp version matches all four `@img/*` pins.
+> animated-image fixture failures. The pin check also verifies that the
+> installed Sharp version exactly matches the `sharp` version in
+> `package.json`, then checks the four `@img/*` packages against the native
+> dependencies required by that release.
 
 CI (`.github/workflows/ci.yml`) runs `yarn run check` on every pull request and
 on pushes to `main`, using Node.js 22.23.4 and `yarn install --frozen-lockfile`.
@@ -222,15 +228,15 @@ Suites:
 
 | File | Scope |
 |---|---|
-| `tests/index.test.js` | Cacheable handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, fallback-quality calculation, fallback-width generation, raw-query URL extraction (encoded, legacy unencoded, absent), `*.localhost` rejection, the legacy `1.1.x.x/bmi/` URL unwrap, and the rule for when the original may replace WebP output (including EXIF-rotated and multi-frame widths). No network or Sharp encoding. |
-| `tests/health.test.js` | `/api/health`, method handling, and consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, `docs/backend-contract.md`, the release named in `README.md` and the newest `CHANGELOG.md` entry, plus a guard that every `tests/*.test.js` file is listed exactly once in the `test:fast` or `test:integration` script (the scripts name files explicitly, so an unlisted suite would silently never run). |
-| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, malformed-address rejection, and public IP literals being pinned directly (no DNS) while the shared deadline still applies. |
-| `tests/site.test.js` | The diagnostics page (`site.js`) evaluated in a `node:vm` context with a minimal fake DOM and a scripted `fetch`, with timers shortened: a healthy run, strict validation of all three image-size telemetry headers and their arithmetic consistency, a failing health check skipping the rest, a healthy proxy without Sharp being badged as failed rather than online, the server's error message being shown, API-handshake and Cache-Control policy failures reflected in the top-level badge, and response bodies that stall after the headers (handshake and health) ending as a timeout with the button re-enabled, plus a WCAG AA contrast check (4.5:1) of every text colour (body, muted, accent, status and primary-button text) against each surface it is drawn on, in both the dark and light themes, copy-feedback timer reset on repeated clicks, and protection against out-of-order clipboard completions and stale reset callbacks. No browser, no network. |
-| `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, undecodable input, truncated-JPEG tolerance, the bounded fallback encode count, and the request-budget `504`. |
-| `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, `jpeg=true`, unsupported redirect schemes, the `508` redirect limit, redirects into private or local addresses (including IPv4-mapped IPv6) rejected with `403` by the real resolver and address policy on every hop after the first, a delayed test resolver that cannot start an upstream request after the shared deadline, a redirect hostname rejected when the test resolver returns a private-address result, `Referer` handling on same/cross-origin redirects, every `x-*` telemetry header being listed in `Access-Control-Expose-Headers`, fixed `Accept`/`User-Agent`/`Accept-Language` and no `Cookie` upstream, legacy and encoded raw-query URLs, upstream timeout and mid-body stall mapping, the `413` input-size limit, the `413` 6 MP decode limit (single-frame, exactly-at-limit and multi-frame), never-enlarge with detected type, never-enlarge honoring `bw=1` and `max_width` (including the EXIF-rotated width), non-browser formats staying WebP, and WebP telemetry headers. |
+| `tests/index.test.js` | Cacheable handshake, method handling, invalid URL and literal private-host rejection, shared response headers, integer query parsing, the empty-`quality` fall-through to the legacy `l` alias, fallback-quality calculation, fallback-width generation, raw-query URL extraction (encoded, legacy unencoded, absent), `*.localhost` rejection, the legacy `1.1.x.x/bmi/` URL unwrap, and the rule for when the original may replace WebP output (including EXIF-rotated and multi-frame widths). No network or Sharp encoding. |
+| `tests/health.test.js` | `/api/health`, method handling, consistency of release version, API level, and feature metadata across `package.json`, `util/version.js`, `docs/backend-contract.md`, the release named in `README.md` and the newest `CHANGELOG.md` entry, a guard that the three site-wide security headers in `netlify.toml` match `util/headers.js`, plus a guard that every `tests/*.test.js` file is listed exactly once in the `test:fast` or `test:integration` script (the scripts name files explicitly, so an unlisted suite would silently never run). |
+| `tests/address-policy.test.js` | Every CIDR in both address-policy tables at its boundaries, globally reachable IANA exceptions inside broader parent ranges and their blocked neighbours, IPv6 global-unicast edges, special-purpose fixtures, embedded-IPv4 forms, table-overlap checks, malformed-address rejection, pinned DNS lookup family filtering for single and `all` results (including family mismatch errors), public IP literals being pinned directly (no DNS) while the shared deadline still applies, and a DNS answer with no addresses being reported as a 502 resolution failure rather than a 403 private host. |
+| `tests/site.test.js` | The diagnostics page (`site.js`) evaluated in a `node:vm` context with a minimal fake DOM and a scripted `fetch`, with timers shortened: a healthy run, strict validation of all three image-size telemetry headers and their arithmetic consistency, a failing health check skipping the rest, a successful image response whose body, CORS header or image-validation telemetry fails its check reported as unexpected rather than as an HTTP status, a handshake timeout after a Sharp failure reported on the handshake rather than skipped, a healthy proxy without Sharp being badged as failed rather than online, a handshake HTTP error after a Sharp failure being badged the same way as a handshake timeout, the server's error message being shown, API-handshake and Cache-Control policy failures reflected in the top-level badge, and response bodies that stall after the headers (handshake and health) ending as a timeout with the button re-enabled, plus a WCAG AA contrast check (4.5:1) of every text colour (body, muted, accent, status and primary-button text) against each surface it is drawn on, in both the dark and light themes, copy-feedback timer reset on repeated clicks, and protection against out-of-order clipboard completions and stale reset callbacks. No browser, no network. |
+| `tests/compress.test.js` | Adaptive fallback widths and real Sharp encodes, including tight caps for `max_width` 100, 320 and 800, unrestricted fallback below 16 px, JPEG fallback, large outputs, never-enlarge behavior, `413` when no width fits, undecodable input, truncated-JPEG tolerance, the bounded fallback encode count, and the request-budget `504`. |
+| `tests/integration.test.js` | The handler against a local `node:http` server pinned via a test-only resolver: transparent JPEG flattening, animated-source passthrough, `quality=0`, `jpeg=true`, unsupported redirect schemes, the `508` redirect limit, redirects into private or local addresses (including IPv4-mapped IPv6) rejected with `403` by the real resolver and address policy on every hop after the first, a delayed test resolver that cannot start an upstream request after the shared deadline, a redirect hostname rejected when the test resolver returns a private-address result, `Referer` handling on same/cross-origin redirects, standard redirects (301/302/303/307/308) without a `Location` header mapping to `502`, and non-redirect 3xx responses (including 300 and 304) rejected without following their `Location`, every `x-*` telemetry header being listed in `Access-Control-Expose-Headers`, fixed `Accept`/`User-Agent`/`Accept-Language` and no `Cookie` upstream, legacy and encoded raw-query URLs, upstream timeout and mid-body stall mapping, the `413` input-size limit, the `413` 6 MP decode limit (single-frame, exactly-at-limit and multi-frame), never-enlarge with detected type, never-enlarge honoring `bw=1` and `max_width` (including the EXIF-rotated width), non-browser formats staying WebP, and WebP telemetry headers. |
 
-The six checked-in suites currently contain 84 tests: 44 in `test:fast` and
-40 in `test:integration`.
+The six checked-in suites currently contain 97 tests: 54 in `test:fast` and
+43 in `test:integration`. The shared PNG fixture lives in `tests/fixtures.js`, which is a helper, not a suite.
 
 The integration suite uses a small test-only configuration hook in
 `functions/index.js` (`configureForTests`) to shorten the deadline and shrink

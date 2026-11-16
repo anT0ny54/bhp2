@@ -10,6 +10,15 @@ const diagnostics = ["reachable", "cors", "compression", "cache"];
 // state: "pending" | "ok" | "fail" | "skip" (not run because an earlier check failed).
 const STATE_LABELS = { pending: "Pending", ok: "Passed", fail: "Failed", skip: "Skipped" };
 const STATE_ICONS = { pending: "•", ok: "✓", fail: "!", skip: "–" };
+// Badge text for each failed check, plus the badge for a proxy whose Sharp
+// image processor is unavailable.
+const FAILURE_BADGES = {
+  reachable: "Proxy unreachable",
+  cors: "API handshake failed",
+  compression: "Compression check failed",
+  cache: "Cache check failed",
+  sharp: "Compression unavailable",
+};
 
 function setStatus(id, state, detail = "") {
   $(`${id}-status`).className = `state ${state}`;
@@ -101,14 +110,14 @@ async function runDiagnostics() {
     const sharpOk = data?.sharp?.available === true;
     const sharpError = `Sharp unavailable: ${data?.sharp?.error || "runtime module missing"}`;
 
-    setStatus(
-      "reachable",
-      healthOk ? "ok" : "fail",
-      healthOk ? `v${data.version ?? "?"} · API ${data.api ?? "?"} · ${data.service ?? "proxy"}` : `HTTP ${health.status}`
-    );
+    // A 200 whose body is wrong is unexpected, not an HTTP status to report.
+    const healthDetail = healthOk
+      ? `v${data.version ?? "?"} · API ${data.api ?? "?"} · ${data.service ?? "proxy"}`
+      : health.ok ? "Unexpected health response" : `HTTP ${health.status}`;
+    setStatus("reachable", healthOk ? "ok" : "fail", healthDetail);
     // Image compression is the proxy's purpose, so a proxy without Sharp is not "online".
-    if (!healthOk) setBadge("fail", "Proxy unreachable");
-    else if (!sharpOk) setBadge("fail", "Compression unavailable");
+    if (!healthOk) setBadge("fail", FAILURE_BADGES.reachable);
+    else if (!sharpOk) setBadge("fail", FAILURE_BADGES.sharp);
 
     if (!healthOk) {
       for (const id of diagnostics.slice(1)) setStatus(id, "skip", "Health check failed");
@@ -121,14 +130,17 @@ async function runDiagnostics() {
     const corsOk = handshake.ok &&
       handshakeBody.trim() === "bandwidth-hero-proxy" &&
       handshake.headers.get("access-control-allow-origin") === "*";
-    setStatus("cors", corsOk ? "ok" : "fail", corsOk ? "Handshake and CORS verified" : `HTTP ${handshake.status}`);
+    const corsDetail = corsOk
+      ? "Handshake and CORS verified"
+      : handshake.ok ? "Unexpected handshake response or missing CORS header" : `HTTP ${handshake.status}`;
+    setStatus("cors", corsOk ? "ok" : "fail", corsDetail);
 
     if (!corsOk) {
-      // Keep a Sharp failure already reported by the health check.
-      if (sharpOk) {
-        setStatus("compression", "skip", "Handshake check failed");
-        setBadge("fail", "API handshake failed");
-      }
+      // Keep a Sharp failure already reported by the health check, but the
+      // badge names the handshake whichever way it failed (timeout or HTTP
+      // error), so it does not depend on whether Sharp is also missing.
+      if (sharpOk) setStatus("compression", "skip", "Handshake check failed");
+      setBadge("fail", FAILURE_BADGES.cors);
       setStatus("cache", "skip", "Handshake check failed");
       return;
     }
@@ -155,9 +167,11 @@ async function runDiagnostics() {
     const elapsed = Math.round(performance.now() - started);
     const telemetry = imageCheck.telemetry;
     const compressedOk = telemetry !== null;
-    const compressionDetail = imageCheck.message
-      ? `HTTP ${image.status}: ${imageCheck.message}`
-      : `HTTP ${image.status}`;
+    const compressionDetail = image.ok
+      ? `Unexpected image response${imageCheck.message ? `: ${imageCheck.message}` : ""}`
+      : imageCheck.message
+        ? `HTTP ${image.status}: ${imageCheck.message}`
+        : `HTTP ${image.status}`;
 
     let successDetail = "";
     if (compressedOk) {
@@ -165,44 +179,27 @@ async function runDiagnostics() {
       successDetail = `${type} · ${elapsed} ms · ${((telemetry.saved / telemetry.original) * 100).toFixed(1)}% saved`;
     }
 
-    setStatus(
-      "compression",
-      compressedOk ? "ok" : "fail",
-      compressedOk ? successDetail : sharpOk ? compressionDetail : sharpError
-    );
+    setStatus("compression", compressedOk ? "ok" : "fail", compressedOk ? successDetail : compressionDetail);
 
     // Error responses are deliberately private/no-store, so the cache check
     // is only meaningful for a successful image response.
     if (!compressedOk) {
       setStatus("cache", "skip", "Image check failed");
-      setBadge("fail", "Compression check failed");
+      setBadge("fail", FAILURE_BADGES.compression);
       return;
     }
     const cache = image.headers.get("cache-control") || "";
     const cacheOk = /^public,/i.test(cache);
     setStatus("cache", cacheOk ? "ok" : "fail", cacheOk ? "Public Cache-Control directive present" : "Cache-Control is not public");
-    setBadge(cacheOk ? "ok" : "fail", cacheOk ? "Proxy online" : "Cache check failed");
+    setBadge(cacheOk ? "ok" : "fail", cacheOk ? "Proxy online" : FAILURE_BADGES.cache);
   } catch (error) {
-    const detail = isAbort(error) ? "Request timed out" : "Connection or CORS error";
-    // Results already shown (passed checks, or a failure such as "Sharp
-    // unavailable") are kept. Only the first unfinished check reports this
-    // error, and only if nothing has failed yet; the rest were never run.
-    let failureShown = diagnostics.some((id) => hasState(id, "fail"));
-    for (const id of diagnostics) {
-      if (!hasState(id, "pending")) continue;
-      if (failureShown) {
-        setStatus(id, "skip", "Diagnostics stopped");
-        continue;
+    const stopped = diagnostics.find((id) => hasState(id, "pending"));
+    if (stopped) {
+      setStatus(stopped, "fail", isAbort(error) ? "Request timed out" : "Connection or CORS error");
+      setBadge("fail", FAILURE_BADGES[stopped]);
+      for (const id of diagnostics.slice(diagnostics.indexOf(stopped) + 1)) {
+        if (hasState(id, "pending")) setStatus(id, "skip", "Diagnostics stopped");
       }
-      setStatus(id, "fail", detail);
-      failureShown = true;
-      const badgeText = {
-        reachable: "Proxy unreachable",
-        cors: "API handshake failed",
-        compression: "Compression check failed",
-        cache: "Cache check failed",
-      }[id];
-      setBadge("fail", badgeText);
     }
   } finally {
     button.disabled = false;
