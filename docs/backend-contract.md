@@ -36,14 +36,16 @@ The image URL is read from the raw query string:
 - **Unencoded legacy** (value starts with `http://` or `https://`): the image
   URL's own query string leaked into the outer one, so the value is taken
   verbatim up to the first proxy parameter (`&quality=`, `&l=`, `&bw=`,
-  `&jpeg=`, `&max_width=`). Such responses use `Netlify-Vary: query`.
+  `&jpeg=`, `&max_width=`). All successful image responses use the same
+  `Netlify-Vary: query` cache instruction, which includes these legacy keys.
 
 A request without `url` is the legacy handshake: `200` with the plain-text body
 `bandwidth-hero-proxy` and `Cache-Control: public, max-age=300`.
 
 Non-numeric `quality`/`max_width` values fall back to their defaults; numeric
 values are clamped (`quality` 1–100, `max_width` 0–8192). `quality=0`
-clamps to 1 — a present value is never mistaken for an absent one.
+clamps to 1 — a present value is never mistaken for an absent one. An empty
+`quality=` counts as absent, so the legacy `l` alias still applies.
 
 ## Limits
 
@@ -179,7 +181,7 @@ a broken deployment is diagnosable from the response body.
 | 415 | Upstream explicitly returned a non-image `Content-Type` |
 | 4xx/5xx | Upstream error statuses are passed through |
 | 500 | Other processing failure (for example, undecodable image data) |
-| 502 | DNS failure, upstream connection failure `[<code>]`, or invalid redirect |
+| 502 | DNS failure, upstream connection failure `[<code>]`, invalid redirect, or an upstream non-success status outside 400–599 (including non-redirect 3xx responses) |
 | 503 | Sharp is unavailable on the runtime |
 | 504 | Upstream deadline or socket inactivity timeout (including a body that stalls mid-download), Sharp processing timeout, or request budget exhausted before a fitting output was found |
 | 508 | More than 5 redirects |
@@ -194,6 +196,9 @@ a broken deployment is diagnosable from the response body.
   outbound connection is pinned to exactly those validated addresses via the
   `lookup` option of Node's native `http`/`https.request`, so a hostname can't
   rebind to a private address between the check and the connection.
+- Only standard redirect statuses (`301`, `302`, `303`, `307`, `308`) are
+  followed. Other non-success 3xx responses (including `300` and `304`) are
+  returned as `502` even when they include a `Location` header.
 - Redirect destinations are re-resolved, re-checked, and re-pinned the same
   way before each hop is fetched.
 - Cookies are never forwarded upstream (a browser only sends the proxy
@@ -215,8 +220,9 @@ a broken deployment is diagnosable from the response body.
 
 ### Address policy
 
-The policy is table-driven (`BLOCKED_IPV4_CIDRS` and `BLOCKED_IPV6_CIDRS` in
-`util/validate.js`) and is checked against the IANA special-purpose registries.
+The policy is table-driven (`BLOCKED_IPV4_CIDRS`, `BLOCKED_IPV6_CIDRS`,
+`ALLOWED_IPV4_CIDRS` and `ALLOWED_IPV6_CIDRS` in `util/validate.js`) and is
+checked against the IANA special-purpose registries.
 Every address a hostname resolves to must pass; one blocked answer rejects the
 whole request.
 
@@ -229,14 +235,17 @@ whole request.
 | `100.64.0.0/10` | Shared address space / CGNAT |
 | `127.0.0.0/8` | Loopback |
 | `169.254.0.0/16` | Link-local (includes cloud metadata endpoints) |
-| `192.0.0.0/24` | IETF protocol assignments |
+| `192.0.0.0/24` except `192.0.0.9/32` and `192.0.0.10/32` | IETF protocol assignments; the two more-specific anycast allocations are globally reachable exceptions |
 | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | Documentation (TEST-NET-1/2/3) |
 | `192.88.99.0/24` | Deprecated 6to4 relay anycast |
 | `198.18.0.0/15` | Benchmarking |
 | `224.0.0.0/4` | Multicast |
 | `240.0.0.0/4` | Reserved, including `255.255.255.255` |
 
-The rest of `192.0.0.0/16` is ordinary public address space and is allowed.
+Outside `192.0.0.0/24` and `192.0.2.0/24`, the rest of `192.0.0.0/16` is
+ordinary public address space and is allowed. The more-specific `192.0.0.9/32` (PCP Anycast) and `192.0.0.10/32` (TURN Anycast)
+allocations are also allowed because IANA marks them Globally Reachable; all
+other addresses in `192.0.0.0/24` remain blocked.
 
 **IPv6: rule set**
 
@@ -250,7 +259,16 @@ The rest of `192.0.0.0/16` is ordinary public address space and is allowed.
 3. Inside `2000::/3` these ranges are rejected: `2001::/23` (IETF protocol
    assignments: Teredo, benchmarking, ORCHID, AMT and others),
    `2001:db8::/32` (documentation) and `3fff::/20` (documentation).
-4. All other addresses in `2000::/3` are allowed. Allocated global unicast
+4. More-specific allocations inside `2001::/23` are exceptions when IANA marks
+   them Globally Reachable. These exact allocations are allowed:
+   - `2001:1::1/128` — Port Control Protocol Anycast
+   - `2001:1::2/128` — TURN Anycast
+   - `2001:1::3/128` — DNS-SD Service Registration Protocol Anycast
+   - `2001:3::/32` — Automatic Multicast Tunneling (AMT)
+   - `2001:4:112::/48` — AS112-v6
+   - `2001:20::/28` — ORCHIDv2
+   - `2001:30::/28` — Drone Remote ID Protocol Entity Tags
+5. All other addresses in `2000::/3` are allowed. Allocated global unicast
    space is deliberately not blanket-blocked.
 
 Malformed or unparseable addresses are rejected.
@@ -266,21 +284,25 @@ Image responses use a 24-hour browser cache and a 30-day Netlify CDN cache:
 ```text
 Cache-Control: public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800
 Netlify-CDN-Cache-Control: public, durable, s-maxage=2592000, stale-while-revalidate=604800
-Netlify-Vary: query=url|quality|bw|jpeg|max_width|l
+Netlify-Vary: query
+Vary: Referer, DNT
 ```
 
-Responses for unencoded legacy URLs whose own query string leaked into the
-outer one use `Netlify-Vary: query` instead, so different upstream URLs never
-share a cache entry. Image-endpoint errors use `private, no-store`.
+Every successful image response uses the same `Netlify-Vary: query` instruction.
+The complete query string is part of the cache key so unencoded legacy URLs,
+whose own parameters (for example `w` and `h`) leak into the proxy query, cannot
+collide with another upstream image. Keeping this instruction constant also
+avoids cache-key drift between encoded and legacy clients. Image-endpoint errors
+use `private, no-store`.
 
-**Known limitation:** the upstream `Accept`, `User-Agent` and
-`Accept-Language` headers are fixed so they cannot vary the cached result, but
-`Referer` (kept for hotlink protection) and `DNT` are forwarded from the client
-and are **not** part of the cache key. If an image host answers differently
-depending on `Referer` (for example a hotlink-protection placeholder served
-with status 200), the variant produced by the first request is what the CDN
-serves for the next 30 days. Error responses are never cached, so a host that
-refuses with `403` is not affected.
+`Referer` (kept for hotlink protection) and `DNT` are forwarded upstream and can
+change the returned image. They are therefore listed in the standard HTTP
+`Vary` response header. Netlify respects standard `Vary` alongside
+`Netlify-Vary`; `Referer` cannot be selected through Netlify's `Netlify-Vary`
+header selector. This creates separate cache variants for different referring
+pages and DNT values, trading some cache reuse for correct, isolated responses.
+The upstream `Accept`, `User-Agent` and `Accept-Language` remain fixed and do
+not need to vary the cache key.
 
 ## Netlify deployment
 
