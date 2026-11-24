@@ -51,8 +51,8 @@ clamps to 1 — a present value is never mistaken for an absent one. An empty
 
 | Limit | Value |
 |---|---|
-| Upstream fetch deadline (DNS resolution + all redirect hops + body download) | 8 s |
-| Upstream socket inactivity timeout (resets on activity; aborts the same deadline → `504`) | 5 s |
+| Upstream fetch deadline (DNS resolution + TCP connection establishment + all redirect hops + body download) | 8 s |
+| Connected-socket inactivity timeout (starts after TCP connection; resets on activity; aborts the shared controller → `504`) | 5 s |
 | DNS lookup timeout (per hop, also bounded by the deadline above) | 2 s |
 | Redirects followed | 5 |
 | Source image size | 15 MiB (15 × 1024 × 1024 bytes) |
@@ -62,14 +62,20 @@ clamps to 1 — a present value is never mistaken for an absent one. An empty
 | Request budget (no new fallback encode starts after it) | 20 s from request start |
 | Fallback encodes after the first encode | 5 |
 
-Netlify's [current Functions documentation](https://www.netlify.com/knowledge-base/how-to-add-a-backend-api-endpoint-with-netlify-functions/)
-lists a 60 s synchronous execution limit; the effective limit can depend on the
-site and plan, so confirm the timeout your deployment actually gets. The budget
-only stops *new* fallback encodes, so the worst case is a last encode that starts
-just before 20 s and runs for the 8 s Sharp timeout: about 28 s. If your site is
-configured with a lower function timeout, lower `REQUEST_BUDGET_MS` in
-`functions/index.js` to match, or the platform will end the request with an
-opaque gateway error instead of the proxy's `504`.
+Netlify's [current Functions configuration documentation](https://docs.netlify.com/build/functions/configuration/)
+lists a 60 s synchronous execution limit and marks it non-configurable. The
+budget only stops *new* fallback encodes, so the nominal no-queue request
+duration is a last encode that starts just before 20 s and runs for the 8 s Sharp
+processing timeout: about 28 s. This is not a hard wall-clock bound: Sharp
+excludes time waiting for a libuv worker from its processing timeout, so queue
+contention in any pipeline can increase elapsed time and consume the remaining
+headroom before Netlify's 60 s platform limit. Monitor real deployment latency
+and concurrent load rather than treating 28 s as a guaranteed upper bound.
+When deploying behind a different platform or gateway with a shorter execution
+cap, tune `REQUEST_BUDGET_MS` and the Sharp
+processing timeout in `functions/index.js` so an in-flight encode can finish
+before that cap; otherwise the platform may end the request with an opaque
+gateway error instead of the proxy's `504`.
 
 ## Serverless image-processing defaults
 
@@ -181,7 +187,7 @@ a broken deployment is diagnosable from the response body.
 | 415 | Upstream explicitly returned a non-image `Content-Type` |
 | 4xx/5xx | Upstream error statuses are passed through |
 | 500 | Other processing failure (for example, undecodable image data) |
-| 502 | DNS failure, upstream connection failure `[<code>]`, invalid redirect, or an upstream non-success status outside 400–599 (including non-redirect 3xx responses) |
+| 502 | DNS failure, upstream connection failure `[<code>]`, invalid redirect, an empty upstream body, a `Content-Encoding` other than `identity`, or an upstream non-success status outside 400–599 (including non-redirect 3xx responses) |
 | 503 | Sharp is unavailable on the runtime |
 | 504 | Upstream deadline or socket inactivity timeout (including a body that stalls mid-download), Sharp processing timeout, or request budget exhausted before a fitting output was found |
 | 508 | More than 5 redirects |
@@ -209,11 +215,13 @@ a broken deployment is diagnosable from the response body.
   them cannot place one client's variant into the shared cache.
 - IPv6 addresses that embed an IPv4 address (IPv4-mapped, NAT64 and 6to4) are
   judged by the embedded IPv4 address.
-- One 8 s deadline covers DNS resolution, every redirect hop and the body
-  download. The DNS step observes the same abort signal, the deadline is
-  checked before each hop and immediately before each upstream request, and a
-  DNS answer that arrives after the deadline is discarded, so no upstream
-  request is started once the deadline has passed (`504`).
+- One 8 s deadline covers DNS resolution, TCP connection establishment,
+  every redirect hop and the body download. DNS resolution observes the same
+  abort signal; the deadline is checked before each hop and immediately before
+  opening each upstream socket. A DNS answer that arrives after the deadline
+  is discarded, so no upstream request starts after it (`504`). The 5 s
+  connected-socket inactivity timer starts only after TCP connection and resets
+  on socket activity; it aborts the same controller.
 - Upstream response headers are allow-listed (`etag`, `last-modified`,
   `expires`) and are forwarded only when the original bytes are returned; a
   re-encoded image is a new representation and gets none of them.
