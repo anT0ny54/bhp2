@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import { performance } from "node:perf_hooks";
 
 import { resolveAndValidateRemoteUrl, createPinnedLookup } from "../util/validate.js";
 import { PROXY_VERSION, API_VERSION, FEATURES } from "../util/version.js";
@@ -20,9 +21,11 @@ const DETECTED_IMAGE_TYPES = Object.freeze({
 });
 
 // Formats every Chromium-based browser (Bandwidth Guardian's targets) can
-// display. Untouched original bytes are only ever returned for WebP requests
-// when they are one of these; anything else (TIFF, HEIC, JXL, SVG, ...) is
-// always served as WebP, even when the WebP encoding is larger.
+// display. For WebP requests, untouched original bytes replace the WebP
+// encoding only when they are one of these; anything else (TIFF, HEIC, JXL,
+// SVG, ...) is always served as WebP, even when the WebP encoding is larger.
+// The jpeg=1 animated passthrough in handler() is the one other path that
+// returns original bytes, and it is not limited to this list.
 const BROWSER_SAFE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/avif"]);
 
 const DEFAULT_QUALITY = 60;
@@ -411,11 +414,21 @@ async function fetchImage(eventHeaders, initialUrl) {
         throw createHttpError(415, `Upstream returned a non-image response (${contentType}).`);
       }
 
-      return {
-        buffer: await readLimitedBody(upstream, maxImageBytes),
-        contentType,
-        headers: upstream.headers,
-      };
+      // The request asks for identity, so any other Content-Encoding is an
+      // upstream fault. Sharp cannot decode it, and it must not surface as 500.
+      const encoding = String(upstream.headers["content-encoding"] || "").trim().toLowerCase();
+      if (encoding && encoding !== "identity") {
+        upstream.destroy();
+        throw createHttpError(502, `Upstream sent an unsupported content encoding (${encoding}).`);
+      }
+
+      const buffer = await readLimitedBody(upstream, maxImageBytes);
+      // An empty body (for example a 204) is an upstream failure, not a failed
+      // image decode, so it must not surface as the proxy's own 500.
+      if (buffer.length === 0) {
+        throw createHttpError(502, "Upstream returned an empty response.");
+      }
+      return { buffer, contentType, headers: upstream.headers };
     }
   } catch (error) {
     // The controller is aborted by the deadline AND by the socket inactivity
@@ -448,10 +461,10 @@ function getSafeUpstreamHeaders(headers) {
   return output;
 }
 
-function isTimeoutError(error) {
+export function isTimeoutError(error) {
   return error?.name === "AbortError" ||
     error?.name === "TimeoutError" ||
-    /timed?\s*out/i.test(String(error?.message || ""));
+    /\b(?:timed?\s*out|timeout)\b/i.test(String(error?.message || ""));
 }
 
 // Every decode uses the same safety options; building the instance in one
@@ -586,7 +599,7 @@ export async function compressImage(
   if (result.data.length <= maxOutputBytes) return result.data;
 
   let fallbackEncodes = 0;
-  const canEncode = () => fallbackEncodes < MAX_FALLBACK_ENCODES && Date.now() < deadline;
+  const canEncode = () => fallbackEncodes < MAX_FALLBACK_ENCODES && performance.now() < deadline;
   const encodeFallback = (q, width) => {
     fallbackEncodes += 1;
     return encode(q, width);
@@ -613,7 +626,7 @@ export async function compressImage(
     if (candidates.length === 0) break;
     if (!canEncode()) {
       // Out of time with nothing usable is a timeout; out of encodes is a 413.
-      if (!best && Date.now() >= deadline) throw budgetError();
+      if (!best && performance.now() >= deadline) throw budgetError();
       break;
     }
 
@@ -696,7 +709,7 @@ export function originalSatisfiesRequest(metadata, { grayscale, maxWidth }) {
 }
 
 export async function handler(event = {}) {
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   const method = event.httpMethod || "GET";
 
   if (method === "OPTIONS") {
