@@ -83,6 +83,7 @@ function buildBlockList(entries, family) {
 
 const ALLOWED_IPV4 = buildBlockList(ALLOWED_IPV4_CIDRS, "ipv4");
 const BLOCKED_IPV4 = buildBlockList(BLOCKED_IPV4_CIDRS, "ipv4");
+const GLOBAL_UNICAST_IPV6 = buildBlockList([[IPV6_GLOBAL_UNICAST_CIDR]], "ipv6");
 const ALLOWED_IPV6 = buildBlockList(ALLOWED_IPV6_CIDRS, "ipv6");
 const BLOCKED_IPV6 = buildBlockList(BLOCKED_IPV6_CIDRS, "ipv6");
 
@@ -123,14 +124,12 @@ function isPrivateIpv6(value) {
   }
   if (groups[0] === 0x2002) return isPrivateAddress(toIpv4(groups[1], groups[2]), 4);
 
-  // Default-deny outside global unicast (2000::/3): the first three bits of
-  // the first group must be 001. This covers unspecified, loopback, deprecated
-  // IPv4-compatible (::/96), local-use NAT64 (64:ff9b:1::/48), discard
-  // (100::/64), ULA (fc00::/7), link-local (fe80::/10), deprecated site-local
-  // (fec0::/10) and multicast (ff00::/8).
-  if ((groups[0] & 0xe000) !== 0x2000) return true;
-
+  // Default-deny outside IPV6_GLOBAL_UNICAST_CIDR (2000::/3). This covers
+  // unspecified, loopback, deprecated IPv4-compatible (::/96), local-use NAT64
+  // (64:ff9b:1::/48), discard (100::/64), ULA (fc00::/7), link-local (fe80::/10),
+  // deprecated site-local (fec0::/10) and multicast (ff00::/8).
   const text = groups.map((x) => x.toString(16)).join(":");
+  if (!GLOBAL_UNICAST_IPV6.check(text, "ipv6")) return true;
   if (ALLOWED_IPV6.check(text, "ipv6")) return false;
   return BLOCKED_IPV6.check(text, "ipv6");
 }
