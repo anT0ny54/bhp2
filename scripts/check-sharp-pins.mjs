@@ -2,9 +2,9 @@
 //
 // netlify.toml packages the ROOT-pinned @img/* native packages, so a
 // Dependabot bump of `sharp` alone (without the four matching @img/* pins)
-// would ship mismatched native binaries and the function would fail at
-// runtime. This check compares package.json's pins against the
-// optionalDependencies that the INSTALLED sharp actually requires.
+// could ship mismatched native binaries. Compare all declared pins with the
+// installed Sharp package, then verify the native pair selected for this
+// Linux runtime is actually installed at the required versions.
 import fs from "node:fs";
 
 const readJson = (path) => JSON.parse(fs.readFileSync(new URL(path, import.meta.url), "utf8"));
@@ -44,6 +44,40 @@ for (const name of REQUIRED) {
   }
 }
 
+// Netlify's configured runtime is Linux x64. Also validate the native pair on
+// Linux ARM64 or musl hosts when this script is run there. Other developer
+// platforms still get the full declaration check above; their platform-specific
+// native packages are intentionally not required in the install.
+const isLinux = process.platform === "linux";
+const isGlibc = Boolean(process.report?.getReport?.().header?.glibcVersionRuntime);
+const linuxVariant = isGlibc ? "linux" : "linuxmusl";
+const platformPackages = isLinux && ["x64", "arm64"].includes(process.arch)
+  ? [
+      `@img/sharp-${linuxVariant}-${process.arch}`,
+      `@img/sharp-libvips-${linuxVariant}-${process.arch}`,
+    ]
+  : [];
+
+for (const name of platformPackages) {
+  const requiredVersion = sharpPkg.optionalDependencies?.[name];
+  if (!requiredVersion) {
+    errors.push(`${name}: not declared by installed sharp ${sharpPkg.version}`);
+    continue;
+  }
+
+  let installed;
+  try {
+    installed = readJson(`../node_modules/${name}/package.json`);
+  } catch {
+    errors.push(`${name}: required native package is not installed for ${process.platform}/${process.arch}`);
+    continue;
+  }
+
+  if (installed.version !== requiredVersion) {
+    errors.push(`${name}: installed version is ${installed.version}, but sharp ${sharpPkg.version} requires ${requiredVersion}`);
+  }
+}
+
 if (errors.length > 0) {
   console.error("Sharp version/pin mismatch:");
   for (const error of errors) console.error(`  - ${error}`);
@@ -51,4 +85,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Sharp ${sharpPkg.version} and its native pins match package.json.`);
+console.log(`Sharp ${sharpPkg.version} pins match package.json${platformPackages.length ? `; ${platformPackages.join(" and ")} are installed at the required versions` : ""}.`);
