@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import sharp from "sharp";
+import { performance } from "node:perf_hooks";
 
 import { buildFallbackWidths, compressImage } from "../functions/index.js";
 import { noisePng } from "./fixtures.js";
@@ -182,12 +183,23 @@ test("compressImage fallback uses at most 6 encodes, even on the 413 path", asyn
   assert.ok(fail.count <= 6, `413 path used ${fail.count} encodes`);
 });
 
-test("compressImage stops with 504 once the request budget is spent", async () => {
+test("compressImage keeps its deadline monotonic when the wall clock moves backwards", async () => {
   const input = await noisePng(600, 400);
-  await assert.rejects(
-    compressImage(input, true, false, 60, 0, 1_000, { deadline: Date.now() - 1 }),
-    (error) => error.statusCode === 504 && /time budget/i.test(error.message),
-  );
+  const originalDateNow = Date.now;
+
+  try {
+    // A deadline based on performance.now() must not be made active again by
+    // a wall-clock correction. The former Date.now() comparison would see 0
+    // as earlier than this already-expired monotonic deadline and keep encoding.
+    Date.now = () => 0;
+    const deadline = performance.now() - 1;
+    await assert.rejects(
+      compressImage(input, true, false, 60, 0, 1, { deadline }),
+      (error) => error.statusCode === 504 && /time budget/i.test(error.message),
+    );
+  } finally {
+    Date.now = originalDateNow;
+  }
 });
 
 test("truncated JPEGs still decode (failOn: none) instead of failing with 500", async () => {

@@ -10,12 +10,21 @@ import {
   getFallbackQuality,
   getImageUrl,
   getQualityParameter,
+  isTimeoutError,
   normalizeImageUrl,
   originalSatisfiesRequest,
   parseInteger,
 } from "../functions/index.js";
 import { INVALID_URL_ERROR, PRIVATE_HOST_ERROR } from "../util/validate.js";
 import { BASE_HEADERS } from "../util/headers.js";
+
+test("Sharp timeout messages are classified as timeouts", () => {
+  assert.equal(isTimeoutError(new Error("VipsJpeg: timeout")), true);
+  assert.equal(isTimeoutError(new Error("The operation timed out")), true);
+  assert.equal(isTimeoutError(new Error("The operation time out")), true);
+  assert.equal(isTimeoutError(new DOMException("The operation was aborted", "AbortError")), true);
+  assert.equal(isTimeoutError(new Error("invalid image data")), false);
+});
 
 test("GET without url returns the service banner", async () => {
   const response = await handler({ httpMethod: "GET", queryStringParameters: {} });

@@ -1,6 +1,6 @@
 // Diagnostics-page tests (network-free). site.js is a classic browser script,
 // so it is evaluated in a vm context with a minimal fake DOM and a scripted
-// fetch(). setTimeout is shortened so the page's 8 s / 15 s deadlines elapse
+// fetch(). setTimeout is shortened so the page's 8 s / 30 s deadlines elapse
 // in milliseconds; the production script is not modified in any way.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -270,6 +270,23 @@ test("a health body that stalls after the headers reports a timeout, not a bad r
   assert.equal(page.detail("reachable"), "Request timed out");
   assert.equal(page.badge(), "Proxy unreachable");
   assert.equal(page.button().disabled, false);
+});
+
+// The nominal no-queue request path is about 28 s (README: 20 s budget plus
+// one final 8 s Sharp pipeline). Sharp excludes libuv worker queue wait, so
+// contention can make wall-clock time longer; the page deadline exceeds the
+// nominal path.
+test("the image check waits longer than the server's nominal 28 s no-queue path", async () => {
+  const deadlines = [];
+  const page = loadPage(router(), {
+    timerSet: (callback, ms) => {
+      deadlines.push(ms);
+      return setTimeout(callback, Math.min(ms, 25));
+    },
+  });
+  await page.run();
+  assert.equal(page.state("compression"), "Passed");
+  assert.ok(Math.max(...deadlines) >= 28_000, `longest deadline was ${Math.max(...deadlines)} ms`);
 });
 
 // Sharp missing is a real result; a later handshake timeout is still the request that

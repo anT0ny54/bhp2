@@ -14,6 +14,7 @@ import {
   BLOCKED_IPV4_CIDRS,
   BLOCKED_IPV6_CIDRS,
   IPV6_GLOBAL_UNICAST_CIDR,
+  PRIVATE_HOST_ERROR,
   createPinnedLookup,
   isPrivateIp,
   resolveAndValidateRemoteUrl,
@@ -279,6 +280,42 @@ test("a DNS answer with no addresses is a resolution failure (502), not a privat
     assert.equal(result.statusCode, 502);
   } finally {
     dns.lookup = realLookup;
+  }
+});
+
+// Replaces dns.lookup for one call, so a hostname's DNS answer can be chosen
+// (no network access) while the real validation and pinning code runs.
+async function withDnsAnswer(answer, run) {
+  const dns = (await import("node:dns/promises")).default;
+  const realLookup = dns.lookup;
+  dns.lookup = async () => answer;
+  try {
+    return await run();
+  } finally {
+    dns.lookup = realLookup;
+  }
+}
+
+test("a hostname whose DNS answer is public is pinned to exactly those addresses", async () => {
+  const answer = [
+    { address: "8.8.8.8", family: 4 },
+    { address: "2606:4700:4700::1111", family: 6 },
+  ];
+  const result = await withDnsAnswer(answer, () => resolveAndValidateRemoteUrl("http://public-host.test/a.png"));
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.addresses, answer);
+});
+
+test("a hostname with any private address in its DNS answer is rejected with 403", async () => {
+  for (const answer of [
+    [{ address: "10.0.0.7", family: 4 }],
+    [{ address: "8.8.8.8", family: 4 }, { address: "169.254.169.254", family: 4 }],
+    [{ address: "2606:4700:4700::1111", family: 6 }, { address: "fd00::1", family: 6 }],
+  ]) {
+    const result = await withDnsAnswer(answer, () => resolveAndValidateRemoteUrl("http://mixed-host.test/a.png"));
+    assert.equal(result.valid, false, JSON.stringify(answer));
+    assert.equal(result.statusCode, 403, JSON.stringify(answer));
+    assert.equal(result.error, PRIVATE_HOST_ERROR, JSON.stringify(answer));
   }
 });
 

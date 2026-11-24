@@ -12,6 +12,9 @@ const backendContract = readFileSync(new URL("../docs/backend-contract.md", impo
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 const netlifyToml = readFileSync(new URL("../netlify.toml", import.meta.url), "utf8");
+const nodeVersion = readFileSync(new URL("../.nvmrc", import.meta.url), "utf8").trim();
+const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const lockfileWorkflow = readFileSync(new URL("../.github/workflows/update-yarn-lock.yml", import.meta.url), "utf8");
 
 test("release version and feature metadata stay in sync", () => {
   const contractLines = backendContract.split(/\r?\n/).map((line) => line.trim());
@@ -32,6 +35,33 @@ test("netlify.toml's site-wide security headers match util/headers.js", () => {
     assert.equal(values.length, 1, `${name} must be set exactly once in netlify.toml`);
     assert.equal(values[0], BASE_HEADERS[name.toLowerCase()], `${name} differs from util/headers.js`);
   }
+});
+
+test("Netlify and GitHub Actions use the single Node.js version in .nvmrc", () => {
+  assert.match(nodeVersion, /^\d+\.\d+\.\d+$/, ".nvmrc must contain an exact Node.js version");
+
+  for (const [name, workflow] of [
+    ["CI", ciWorkflow],
+    ["Update Yarn lockfile", lockfileWorkflow],
+  ]) {
+    assert.match(workflow, /^\s*node-version-file: "\.nvmrc"\s*$/m, `${name} must read .nvmrc`);
+    assert.doesNotMatch(workflow, /^\s*node-version:/m, `${name} must not define a competing Node.js pin`);
+  }
+
+  assert.doesNotMatch(netlifyToml, /^\s*NODE_VERSION\s*=/m,
+    "netlify.toml must not override the root .nvmrc version");
+
+  const minimum = packageJson.engines.node.match(/^>=(\d+)\.(\d+)\.(\d+)$/);
+  const configured = nodeVersion.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  assert.ok(minimum, "package.json must declare a simple minimum Node.js version");
+  assert.ok(configured, ".nvmrc must be a valid exact Node.js version");
+  const actualParts = configured.slice(1).map(Number);
+  const minimumParts = minimum.slice(1).map(Number);
+  const meetsMinimum = actualParts[0] > minimumParts[0]
+    || (actualParts[0] === minimumParts[0] && actualParts[1] > minimumParts[1])
+    || (actualParts[0] === minimumParts[0] && actualParts[1] === minimumParts[1]
+      && actualParts[2] >= minimumParts[2]);
+  assert.ok(meetsMinimum, `.nvmrc version ${nodeVersion} must satisfy ${packageJson.engines.node}`);
 });
 
 test("GET returns ok with version, api level and features", async () => {

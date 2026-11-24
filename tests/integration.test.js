@@ -7,6 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import http from "node:http";
+import zlib from "node:zlib";
 import sharp from "sharp";
 
 import { handler, configureForTests, resetConfigForTests } from "../functions/index.js";
@@ -25,6 +26,19 @@ const loopbackResolver = async (url) => ({
   addresses: [{ address: "127.0.0.1", family: 4 }],
 });
 
+// Settings every test starts from. Only the values the suite must change are
+// listed; everything else is the production default. Tests that change a
+// setting call restoreBaseConfig() instead of re-typing production limits, so
+// a changed default in functions/index.js cannot silently drift from the tests.
+const BASE_TEST_CONFIG = Object.freeze({
+  fetchTimeoutMs: 2_000,
+  resolveRemoteUrl: loopbackResolver,
+});
+function restoreBaseConfig() {
+  resetConfigForTests();
+  configureForTests(BASE_TEST_CONFIG);
+}
+
 before(async () => {
   routes = new Map();
   server = http.createServer((req, res) => {
@@ -41,11 +55,7 @@ before(async () => {
   baseUrl = `http://proxy.test:${port}`;
   otherOriginUrl = `http://other.test:${port}`;
 
-  configureForTests({
-    fetchTimeoutMs: 2_000,
-    maxOutputBytes: 4_300_000,
-    resolveRemoteUrl: loopbackResolver,
-  });
+  restoreBaseConfig();
 });
 
 after(async () => {
@@ -71,26 +81,10 @@ function tinyJpeg() {
     .toBuffer();
 }
 
-test("jpeg=1 flattens transparency onto white, not black", async () => {
-  const transparent = await sharp({
-    create: { width: 64, height: 64, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-  }).png().toBuffer();
-  serve("/alpha.png", transparent);
-
-  const response = await handler(event(`${baseUrl}/alpha.png`, { jpeg: "1" }));
-  assert.equal(response.statusCode, 200, response.body);
-  assert.equal(response.headers["content-type"], "image/jpeg");
-  const { data, info } = await sharp(Buffer.from(response.body, "base64"))
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  assert.equal(info.channels, 3);
-  assert.deepEqual([...data.slice(0, 3)], [255, 255, 255]);
-});
-
-test("animated sources pass through untouched on jpeg=1 regardless of Content-Type", async () => {
-  // Build three distinct raw frames stacked vertically. Sharp's raw
-  // pageHeight option marks the frame boundaries; passing an array of encoded
-  // buffers to sharp() does not reliably create an animated output.
+// Three distinct 32x32 frames stacked vertically. Sharp's raw pageHeight option
+// marks the frame boundaries; passing an array of encoded buffers to sharp()
+// does not reliably create an animated output.
+async function threeFrameWebp() {
   const frameSize = 32 * 32 * 3;
   const frame = (r, g, b) => {
     const pixels = Buffer.alloc(frameSize);
@@ -108,8 +102,29 @@ test("animated sources pass through untouched on jpeg=1 regardless of Content-Ty
   ]), {
     raw: { width: 32, height: 96, channels: 3, pageHeight: 32 },
   }).webp({ delay: [100, 100, 100], loop: 0 }).toBuffer();
-  const meta = await sharp(animated, { animated: true }).metadata();
-  assert.ok((meta.pages || 1) > 1, "fixture must be multi-frame");
+  const metadata = await sharp(animated, { animated: true }).metadata();
+  assert.equal(metadata.pages, 3, 'threeFrameWebp fixture must contain three frames');
+  return animated;
+}
+
+test("jpeg=1 flattens transparency onto white, not black", async () => {
+  const transparent = await sharp({
+    create: { width: 64, height: 64, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+  }).png().toBuffer();
+  serve("/alpha.png", transparent);
+
+  const response = await handler(event(`${baseUrl}/alpha.png`, { jpeg: "1" }));
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers["content-type"], "image/jpeg");
+  const { data, info } = await sharp(Buffer.from(response.body, "base64"))
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  assert.equal(info.channels, 3);
+  assert.deepEqual([...data.slice(0, 3)], [255, 255, 255]);
+});
+
+test("animated sources pass through untouched on jpeg=1 regardless of Content-Type", async () => {
+  const animated = await threeFrameWebp();
 
   // Served with an ordinary image/png Content-Type, exactly like an APNG from
   // a CDN — the old image/(gif|webp|tiff) filter would have flattened this.
@@ -201,7 +216,7 @@ test("upstream stalls surface as 504, not 500", async () => {
     const response = await handler(event(`${baseUrl}/stall.png`));
     assert.equal(response.statusCode, 504);
   } finally {
-    configureForTests({ fetchTimeoutMs: 2_000 });
+    restoreBaseConfig();
   }
 });
 
@@ -226,7 +241,25 @@ test("a resolver that finishes after the shared deadline cannot start an upstrea
     assert.equal(response.statusCode, 504, response.body);
     assert.equal(upstreamStarted, false, "no upstream connection may start after the deadline");
   } finally {
-    configureForTests({ fetchTimeoutMs: 2_000, resolveRemoteUrl: loopbackResolver });
+    restoreBaseConfig();
+  }
+});
+
+test("handler starts the fallback budget with the same monotonic clock", async () => {
+  serve("/budget.png", await noisePng(40, 30));
+  configureForTests({ maxOutputBytes: 1, requestBudgetMs: 0 });
+  const originalDateNow = Date.now;
+
+  try {
+    // If handler() starts its deadline with Date.now() while compressImage()
+    // checks it with performance.now(), this future wall clock makes the
+    // mismatched deadline effectively unreachable and the request ends as 413.
+    Date.now = () => 4_102_444_800_000;
+    const response = await handler(event(`${baseUrl}/budget.png`));
+    assert.equal(response.statusCode, 504, response.body);
+  } finally {
+    Date.now = originalDateNow;
+    restoreBaseConfig();
   }
 });
 
@@ -255,7 +288,7 @@ test("a body that stalls mid-download surfaces as 504 via the socket timer", asy
     assert.equal(response.statusCode, 504, response.body);
     assert.ok(Date.now() - started < 2_000, "the socket timer, not the deadline, must end it");
   } finally {
-    configureForTests({ fetchTimeoutMs: 2_000, socketTimeoutMs: 5_000 });
+    restoreBaseConfig();
   }
 });
 
@@ -391,7 +424,7 @@ test("source above the input size limit returns 413", async () => {
     const response = await handler(event(`${baseUrl}/huge.png`));
     assert.equal(response.statusCode, 413, response.body);
   } finally {
-    configureForTests({ maxImageBytes: 15 * 1024 * 1024 });
+    restoreBaseConfig();
   }
 });
 
@@ -481,7 +514,7 @@ test("a redirect into a private or local address is rejected with 403", async ()
       assert.equal(response.headers["cache-control"], "private, no-store", location);
     }
   } finally {
-    configureForTests({ resolveRemoteUrl: loopbackResolver });
+    restoreBaseConfig();
   }
 });
 
@@ -507,7 +540,7 @@ test("a redirect hostname resolved to a private address is rejected on the later
     assert.equal(response.body, PRIVATE_HOST_ERROR);
     assert.equal(response.headers["cache-control"], "private, no-store");
   } finally {
-    configureForTests({ resolveRemoteUrl: loopbackResolver });
+    restoreBaseConfig();
   }
 });
 
@@ -524,4 +557,85 @@ test("every x-* telemetry header is exposed to cross-origin readers", async () =
   for (const name of telemetry) assert.ok(exposed.includes(name), `${name} is not exposed`);
   // And the list must not name headers that are never sent.
   for (const name of exposed) assert.ok(name in response.headers, `${name} is exposed but not sent`);
+});
+
+test("a non-image upstream Content-Type is rejected with 415", async () => {
+  serve("/page.png", "<p>not an image</p>", "text/html");
+  const response = await handler(event(`${baseUrl}/page.png`));
+  assert.equal(response.statusCode, 415, response.body);
+  assert.match(response.body, /non-image response \(text\/html\)/);
+  assert.equal(response.headers["cache-control"], "private, no-store");
+});
+
+test("a refused upstream connection is a 502 that names the error code", async () => {
+  // Reserve a loopback port, then close it so nothing is listening there.
+  const probe = http.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  const response = await handler(event(`http://proxy.test:${port}/refused.png`));
+  assert.equal(response.statusCode, 502, response.body);
+  assert.equal(response.body, "Upstream connection failed [ECONNREFUSED].");
+});
+
+test("a malformed upstream redirect Location is a 502", async () => {
+  routes.set("/malformed-location.png", (res) => {
+    res.writeHead(302, { location: "http://[bad" });
+    res.end();
+  });
+  const response = await handler(event(`${baseUrl}/malformed-location.png`));
+  assert.equal(response.statusCode, 502, response.body);
+  assert.equal(response.body, "Upstream sent an invalid redirect location.");
+});
+
+test("a streamed body over the input limit is cut off with 413 without Content-Length", async () => {
+  configureForTests({ maxImageBytes: 1_000 });
+  try {
+    // No Content-Length, so the early size check cannot fire: the limit must
+    // be enforced while the chunks are read.
+    routes.set("/streamed-huge.png", (res) => {
+      res.writeHead(200, { "content-type": "image/png" });
+      res.write(Buffer.alloc(800));
+      res.end(Buffer.alloc(800));
+    });
+    const response = await handler(event(`${baseUrl}/streamed-huge.png`));
+    assert.equal(response.statusCode, 413, response.body);
+    assert.equal(response.body, "The source image is too large.");
+  } finally {
+    restoreBaseConfig();
+  }
+});
+
+test("an animated original above the response target is refused with 413, not returned", async () => {
+  const animated = await threeFrameWebp();
+  serve("/anim-over-target.webp", animated, "image/webp");
+  configureForTests({ maxOutputBytes: animated.length - 1 });
+  try {
+    const response = await handler(event(`${baseUrl}/anim-over-target.webp`, { jpeg: "1" }));
+    assert.equal(response.statusCode, 413, response.body);
+    assert.match(response.body, /too large to return unmodified/);
+  } finally {
+    restoreBaseConfig();
+  }
+});
+
+test("an upstream Content-Encoding other than identity is a 502, not a decode 500", async () => {
+  const png = await noisePng(40, 30);
+  routes.set("/gzipped.png", (res) => {
+    res.writeHead(200, { "content-type": "image/png", "content-encoding": "gzip" });
+    res.end(zlib.gzipSync(png));
+  });
+  const response = await handler(event(`${baseUrl}/gzipped.png`));
+  assert.equal(response.statusCode, 502, response.body);
+  assert.equal(response.body, "Upstream sent an unsupported content encoding (gzip).");
+});
+
+test("an empty upstream body (204) is a 502, not a decode 500", async () => {
+  routes.set("/no-content.png", (res) => {
+    res.writeHead(204);
+    res.end();
+  });
+  const response = await handler(event(`${baseUrl}/no-content.png`));
+  assert.equal(response.statusCode, 502, response.body);
+  assert.equal(response.body, "Upstream returned an empty response.");
 });
