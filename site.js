@@ -21,8 +21,9 @@ const FAILURE_BADGES = {
 };
 
 function setStatus(id, state, detail = "") {
-  $(`${id}-status`).className = `state ${state}`;
-  $(`${id}-status`).textContent = STATE_LABELS[state];
+  const status = $(`${id}-status`);
+  status.className = `state ${state}`;
+  status.textContent = STATE_LABELS[state];
   $(`${id}-metric`).textContent = detail;
   $(`${id}-icon`).textContent = STATE_ICONS[state];
 }
@@ -156,13 +157,15 @@ async function runDiagnostics() {
     // GitHub's public avatar is intentionally fetched by the proxy, not by this page.
     const sample = "https://avatars.githubusercontent.com/u/9919";
     const started = performance.now();
-    // The server's own upstream deadline is 8 s, so give this request more
-    // headroom than that; otherwise the page aborts first and can never show
-    // the server's 504 message.
+    // The nominal no-queue request path is about 28 s: a 20 s request budget
+    // plus one final 8 s Sharp pipeline (README, "Adaptive output fallback").
+    // Sharp excludes libuv worker queue wait, so contention can extend wall time.
+    // The 30 s page deadline exceeds the nominal path and lets the server return
+    // its own 504 under normal queue conditions instead of aborting first.
     const { response: image, body: imageCheck } = await fetchWithTimeout(
       `${proxyPath}?url=${encodeURIComponent(sample)}`,
       readImageCheck,
-      15000,
+      30000,
     );
     const elapsed = Math.round(performance.now() - started);
     const telemetry = imageCheck.telemetry;

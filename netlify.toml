@@ -2,9 +2,6 @@
   publish = "."
   functions = "functions"
 
-[build.environment]
-  NODE_VERSION = "22.23.4"
-
 [functions]
   node_bundler = "esbuild"
   # Keep Sharp external because it loads native binaries at runtime.
